@@ -12,6 +12,8 @@ import re
 import ssl
 import sys
 from dataclasses import asdict, dataclass
+from email import policy
+from email.parser import BytesParser
 from email.utils import parseaddr
 from pathlib import Path
 from typing import Iterable
@@ -65,6 +67,7 @@ class DeletePatternRules:
     subject_regex: tuple[RegexRule, ...]
     body_regex: tuple[RegexRule, ...]
     auth_triple_fail: bool
+    malformed_from: bool
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,7 @@ class MessageSummary:
     date: str
     message_id: str
     authentication_results: tuple[str, ...]
+    from_header_defects: tuple[str, ...]
     size_bytes: int | None
     never_filter_match: bool
     never_filter_reason: str
@@ -477,6 +481,7 @@ def load_scanner_rules(path: Path) -> ScannerRules:
                 subject_regex=(),
                 body_regex=(),
                 auth_triple_fail=False,
+                malformed_from=False,
             ),
         )
 
@@ -529,6 +534,10 @@ def load_scanner_rules(path: Path) -> ScannerRules:
             auth_triple_fail=parse_boolean_rule(
                 delete_patterns.get("auth_triple_fail", False),
                 "delete_patterns.auth_triple_fail",
+            ),
+            malformed_from=parse_boolean_rule(
+                delete_patterns.get("malformed_from", False),
+                "delete_patterns.malformed_from",
             ),
         ),
     )
@@ -585,6 +594,17 @@ def evaluate_auth_triple_fail(summary: MessageSummary) -> tuple[bool, str]:
     return True, "delete_patterns.auth_triple_fail:spf=fail,dkim=fail,dmarc=fail"
 
 
+def evaluate_malformed_from(summary: MessageSummary) -> tuple[bool, str]:
+    if summary.from_header_defects:
+        defects = ",".join(summary.from_header_defects)
+        return True, f"delete_patterns.malformed_from:defects={defects}"
+
+    if not summary.sender_email:
+        return True, "delete_patterns.malformed_from:no_parsed_sender_email"
+
+    return False, ""
+
+
 def evaluate_delete_candidate(
     summary: MessageSummary,
     body_text: str,
@@ -604,6 +624,11 @@ def evaluate_delete_candidate(
         auth_triple_fail_match, auth_reason = evaluate_auth_triple_fail(summary)
         if auth_triple_fail_match:
             return True, auth_reason
+
+    if scanner_rules.delete_patterns.malformed_from:
+        malformed_from_match, malformed_reason = evaluate_malformed_from(summary)
+        if malformed_from_match:
+            return True, malformed_reason
 
     for rule in scanner_rules.delete_patterns.from_regex:
         if summary.sender_name and rule.pattern.search(summary.sender_name):
@@ -878,8 +903,16 @@ def fetch_message_summary(
     if not headers_raw:
         return None
 
-    message = email.message_from_bytes(headers_raw)
-    sender = decode_header_value(message.get("From"))
+    message = BytesParser(policy=policy.default).parsebytes(headers_raw)
+    from_header = message["From"]
+    if from_header is None:
+        sender = ""
+        from_header_defects = ("MissingFromHeader",)
+    else:
+        sender = decode_header_value(from_header)
+        from_header_defects = tuple(
+            type(defect).__name__ for defect in getattr(from_header, "defects", ())
+        )
     sender_name = extract_sender_name(sender)
     sender_email = extract_sender_email(sender)
     sender_domain = extract_domain(sender_email)
@@ -901,6 +934,7 @@ def fetch_message_summary(
         date=decode_header_value(message.get("Date")),
         message_id=decode_header_value(message.get("Message-ID")),
         authentication_results=authentication_results,
+        from_header_defects=from_header_defects,
         size_bytes=size_bytes,
         never_filter_match=False,
         never_filter_reason="",
@@ -1081,8 +1115,9 @@ def print_report(
         f"{len(scanner_rules.delete_patterns.body_regex)} body regex."
     )
     print(
-        "Loaded auth delete rule: "
-        f"auth_triple_fail={'enabled' if scanner_rules.delete_patterns.auth_triple_fail else 'disabled'}."
+        "Loaded boolean delete rules: "
+        f"auth_triple_fail={'enabled' if scanner_rules.delete_patterns.auth_triple_fail else 'disabled'}, "
+        f"malformed_from={'enabled' if scanner_rules.delete_patterns.malformed_from else 'disabled'}."
     )
     print(f"Never-filter protected message(s): {protected_count}")
     print(f"Delete-candidate message(s): {delete_candidate_count}")
