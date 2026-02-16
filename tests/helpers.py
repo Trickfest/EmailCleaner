@@ -21,6 +21,7 @@ def make_scanner_rules(
     body_regex: list[str] | None = None,
     auth_triple_fail: bool = False,
     malformed_from: bool = False,
+    quarantine_cleanup_days: int | None = None,
 ) -> ScannerRules:
     return ScannerRules(
         never_filter=NeverFilterRules(
@@ -38,6 +39,7 @@ def make_scanner_rules(
             auth_triple_fail=auth_triple_fail,
             malformed_from=malformed_from,
         ),
+        quarantine_cleanup_days=quarantine_cleanup_days,
     )
 
 

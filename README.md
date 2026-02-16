@@ -126,6 +126,7 @@ Current rules support:
 
 - `never_filter`: specific sender addresses or sender domains that should never be filtered/deleted
 - `always_delete`: sender addresses or sender domains that should always be marked as delete candidates
+- `quarantine_cleanup_days`: optional integer. When set, delete messages in `Quarantine` older than N days each run. If omitted, `null`, or not present, cleanup is disabled.
 - `delete_patterns.auth_triple_fail`: marks as delete candidate only when `Authentication-Results` reports `spf=fail`, `dkim=fail`, and `dmarc=fail` with no conflicting status values
 - `delete_patterns.malformed_from`: marks as delete candidate when the `From` header is missing, malformed, or cannot be parsed to a sender email address
 - `delete_patterns`: regex rules for sender (`From`), subject, and message body that mark messages as delete candidates
@@ -155,6 +156,7 @@ Example:
       "promo-outlet.example"
     ]
   },
+  "quarantine_cleanup_days": 30,
   "delete_patterns": {
     "auth_triple_fail": true,
     "malformed_from": false,
@@ -205,6 +207,12 @@ Delete-candidate actions:
 - Default: message is moved to `Quarantine`
 - `--hard-delete`: no-op placeholder (message is not deleted in this POC)
 - `--dry-run`: no message move/delete; output shows what would happen in normal mode
+
+Quarantine cleanup behavior:
+
+- If `quarantine_cleanup_days` is configured, cleanup runs once per account after the scan.
+- Cleanup targets only the `Quarantine` folder and deletes messages older than N days.
+- In `--dry-run`, cleanup reports how many messages would be deleted and does not delete anything.
 
 ### How "new messages" are handled
 

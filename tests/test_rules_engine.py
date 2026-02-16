@@ -198,10 +198,30 @@ def test_load_scanner_rules_reads_malformed_from_boolean(tmp_path) -> None:
     assert len(rules.delete_patterns.from_regex) == 1
 
 
+def test_load_scanner_rules_reads_quarantine_cleanup_days(tmp_path) -> None:
+    rules_path = tmp_path / "rules.json"
+    payload = {"quarantine_cleanup_days": 7}
+    rules_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rules = load_scanner_rules(rules_path)
+
+    assert rules.quarantine_cleanup_days == 7
+
+
 def test_load_scanner_rules_rejects_non_boolean_malformed_from(tmp_path) -> None:
     rules_path = tmp_path / "rules.json"
     payload = {"delete_patterns": {"malformed_from": "yes"}}
     rules_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="delete_patterns.malformed_from"):
+        load_scanner_rules(rules_path)
+
+
+@pytest.mark.parametrize("value", [0, -3, "7", True])
+def test_load_scanner_rules_rejects_invalid_quarantine_cleanup_days(tmp_path, value: object) -> None:
+    rules_path = tmp_path / "rules.json"
+    payload = {"quarantine_cleanup_days": value}
+    rules_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="quarantine_cleanup_days"):
         load_scanner_rules(rules_path)

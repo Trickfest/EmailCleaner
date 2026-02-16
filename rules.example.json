@@ -20,6 +20,7 @@
       "promo-outlet.example"
     ]
   },
+  "quarantine_cleanup_days": 30,
   "delete_patterns": {
     "auth_triple_fail": false,
     "malformed_from": false,

@@ -12,6 +12,7 @@ import re
 import ssl
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from email.utils import parseaddr
@@ -75,6 +76,7 @@ class ScannerRules:
     never_filter: NeverFilterRules
     always_delete: AlwaysDeleteRules
     delete_patterns: DeletePatternRules
+    quarantine_cleanup_days: int | None
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,18 @@ class MessageSummary:
     delete_reason: str
     action: str
     action_reason: str
+
+
+@dataclass(frozen=True)
+class QuarantineCleanupResult:
+    status: str
+    configured_days: int | None
+    cutoff_date: str | None
+    matched_count: int
+    deleted_count: int
+    would_delete_count: int
+    store_failed_count: int
+    detail: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -433,6 +447,16 @@ def parse_boolean_rule(raw_value: object, source: str) -> bool:
     raise ValueError(f"{source} must be a boolean.")
 
 
+def parse_optional_positive_int_rule(raw_value: object, source: str) -> int | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+        raise ValueError(f"{source} must be an integer day count.")
+    if raw_value < 1:
+        raise ValueError(f"{source} must be >= 1 when configured.")
+    return raw_value
+
+
 def compile_regex_rules(values: object, source_prefix: str) -> tuple[RegexRule, ...]:
     if values is None:
         return ()
@@ -483,6 +507,7 @@ def load_scanner_rules(path: Path) -> ScannerRules:
                 auth_triple_fail=False,
                 malformed_from=False,
             ),
+            quarantine_cleanup_days=None,
         )
 
     try:
@@ -539,6 +564,10 @@ def load_scanner_rules(path: Path) -> ScannerRules:
                 delete_patterns.get("malformed_from", False),
                 "delete_patterns.malformed_from",
             ),
+        ),
+        quarantine_cleanup_days=parse_optional_positive_int_rule(
+            raw.get("quarantine_cleanup_days"),
+            "quarantine_cleanup_days",
         ),
     )
 
@@ -843,11 +872,145 @@ def get_uidvalidity(imap: imaplib.IMAP4_SSL) -> str | None:
     return None
 
 
+def parse_uid_search_data(data: object) -> list[str]:
+    if not isinstance(data, list) or not data or not data[0]:
+        return []
+    raw = data[0]
+    if isinstance(raw, bytes):
+        return [uid.decode("ascii", errors="ignore") for uid in raw.split()]
+    if isinstance(raw, str):
+        return [uid for uid in raw.split() if uid]
+    return []
+
+
 def search_unseen_uids(imap: imaplib.IMAP4_SSL) -> list[str]:
     status, data = imap.uid("SEARCH", None, "UNSEEN")
     if status != "OK" or not data or not data[0]:
         return []
-    return [uid.decode("ascii", errors="ignore") for uid in data[0].split()]
+    return parse_uid_search_data(data)
+
+
+def cleanup_quarantine_messages(
+    imap: imaplib.IMAP4_SSL,
+    quarantine_folder: str,
+    cleanup_days: int | None,
+    dry_run: bool,
+) -> QuarantineCleanupResult:
+    if cleanup_days is None:
+        return QuarantineCleanupResult(
+            status="DISABLED",
+            configured_days=None,
+            cutoff_date=None,
+            matched_count=0,
+            deleted_count=0,
+            would_delete_count=0,
+            store_failed_count=0,
+            detail="",
+        )
+
+    existing_mailbox = find_mailbox_name(imap, quarantine_folder)
+    cutoff_date = (datetime.now().date() - timedelta(days=cleanup_days)).strftime("%d-%b-%Y")
+    if not existing_mailbox:
+        return QuarantineCleanupResult(
+            status="MAILBOX_MISSING",
+            configured_days=cleanup_days,
+            cutoff_date=cutoff_date,
+            matched_count=0,
+            deleted_count=0,
+            would_delete_count=0,
+            store_failed_count=0,
+            detail=f"mailbox {quarantine_folder!r} not found",
+        )
+
+    if not select_folder(imap, existing_mailbox, readonly=dry_run):
+        return QuarantineCleanupResult(
+            status="SELECT_FAILED",
+            configured_days=cleanup_days,
+            cutoff_date=cutoff_date,
+            matched_count=0,
+            deleted_count=0,
+            would_delete_count=0,
+            store_failed_count=0,
+            detail=f"could not select mailbox {existing_mailbox!r}",
+        )
+
+    search_status, search_data = imap.uid("SEARCH", None, "BEFORE", cutoff_date)
+    if search_status != "OK":
+        detail = decode_imap_response(search_data) or "search failed"
+        return QuarantineCleanupResult(
+            status="SEARCH_FAILED",
+            configured_days=cleanup_days,
+            cutoff_date=cutoff_date,
+            matched_count=0,
+            deleted_count=0,
+            would_delete_count=0,
+            store_failed_count=0,
+            detail=detail,
+        )
+
+    matched_uids = parse_uid_search_data(search_data)
+    matched_count = len(matched_uids)
+    if dry_run:
+        return QuarantineCleanupResult(
+            status="OK",
+            configured_days=cleanup_days,
+            cutoff_date=cutoff_date,
+            matched_count=matched_count,
+            deleted_count=0,
+            would_delete_count=matched_count,
+            store_failed_count=0,
+            detail="",
+        )
+
+    if not matched_uids:
+        return QuarantineCleanupResult(
+            status="OK",
+            configured_days=cleanup_days,
+            cutoff_date=cutoff_date,
+            matched_count=0,
+            deleted_count=0,
+            would_delete_count=0,
+            store_failed_count=0,
+            detail="",
+        )
+
+    marked_count = 0
+    store_failed_count = 0
+    for uid in matched_uids:
+        store_status, _store_data = imap.uid("STORE", uid, "+FLAGS.SILENT", r"(\Deleted)")
+        if store_status == "OK":
+            marked_count += 1
+        else:
+            store_failed_count += 1
+
+    if marked_count:
+        expunge_status, expunge_data = imap.expunge()
+        if expunge_status != "OK":
+            detail = decode_imap_response(expunge_data) or "expunge failed"
+            return QuarantineCleanupResult(
+                status="EXPUNGE_FAILED",
+                configured_days=cleanup_days,
+                cutoff_date=cutoff_date,
+                matched_count=matched_count,
+                deleted_count=0,
+                would_delete_count=0,
+                store_failed_count=store_failed_count,
+                detail=detail,
+            )
+
+    detail = ""
+    if store_failed_count:
+        detail = f"failed to mark {store_failed_count} message(s) for deletion"
+    return QuarantineCleanupResult(
+        status="OK",
+        configured_days=cleanup_days,
+        cutoff_date=cutoff_date,
+        matched_count=matched_count,
+        deleted_count=marked_count,
+        would_delete_count=0,
+        store_failed_count=store_failed_count,
+        detail=detail,
+    )
 
 
 def parse_fetch_parts(fetch_data: Iterable[object]) -> tuple[bytes | None, int | None]:
@@ -1080,6 +1243,7 @@ def print_report(
     dry_run: bool,
     quarantine_folder: str,
     quarantine_will_be_created: bool,
+    cleanup_result: QuarantineCleanupResult,
 ) -> None:
     protected_count = sum(1 for message in messages if message.never_filter_match)
     delete_candidate_count = sum(
@@ -1119,6 +1283,41 @@ def print_report(
         f"auth_triple_fail={'enabled' if scanner_rules.delete_patterns.auth_triple_fail else 'disabled'}, "
         f"malformed_from={'enabled' if scanner_rules.delete_patterns.malformed_from else 'disabled'}."
     )
+    if cleanup_result.configured_days is None:
+        print("Quarantine cleanup: disabled.")
+    else:
+        print(
+            "Quarantine cleanup rule: "
+            f"delete messages older than {cleanup_result.configured_days} day(s) "
+            f"(before {cleanup_result.cutoff_date})."
+        )
+        if cleanup_result.status == "MAILBOX_MISSING":
+            print(f"Quarantine cleanup skipped: {cleanup_result.detail}")
+        elif cleanup_result.status == "SELECT_FAILED":
+            print(f"Quarantine cleanup failed: {cleanup_result.detail}")
+        elif cleanup_result.status == "SEARCH_FAILED":
+            print(f"Quarantine cleanup search failed: {cleanup_result.detail}")
+        elif cleanup_result.status == "EXPUNGE_FAILED":
+            print(
+                "Quarantine cleanup expunge failed: "
+                f"{cleanup_result.detail} (matched={cleanup_result.matched_count}, "
+                f"store_failed={cleanup_result.store_failed_count})"
+            )
+        elif dry_run:
+            print(
+                "Quarantine cleanup dry-run: "
+                f"would delete {cleanup_result.would_delete_count} message(s)."
+            )
+        else:
+            print(
+                "Quarantine cleanup deleted: "
+                f"{cleanup_result.deleted_count} message(s)."
+            )
+            if cleanup_result.store_failed_count:
+                print(
+                    "Quarantine cleanup partial failures: "
+                    f"{cleanup_result.store_failed_count} message(s) could not be marked for deletion."
+                )
     print(f"Never-filter protected message(s): {protected_count}")
     print(f"Delete-candidate message(s): {delete_candidate_count}")
     if hard_delete and dry_run:
@@ -1270,6 +1469,12 @@ def main() -> int:
                     quarantine_folder=quarantine_folder,
                     quarantine_will_be_created=quarantine_will_be_created,
                 )
+                cleanup_result = cleanup_quarantine_messages(
+                    imap,
+                    quarantine_folder=quarantine_folder,
+                    cleanup_days=scanner_rules.quarantine_cleanup_days,
+                    dry_run=args.dry_run,
+                )
                 accounts_state[account.account_key] = updated_state
                 all_messages.extend(messages)
                 print_report(
@@ -1281,6 +1486,7 @@ def main() -> int:
                     dry_run=args.dry_run,
                     quarantine_folder=quarantine_folder,
                     quarantine_will_be_created=quarantine_will_be_created,
+                    cleanup_result=cleanup_result,
                 )
         except imaplib.IMAP4.error as error:
             print(
