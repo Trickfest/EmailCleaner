@@ -21,6 +21,7 @@
     ]
   },
   "delete_patterns": {
+    "auth_triple_fail": false,
     "from_regex": [
       "(?i)promo\\s+alerts",
       "(?i)noreply@deals-now\\.example"

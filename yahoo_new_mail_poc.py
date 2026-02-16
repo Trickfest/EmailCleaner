@@ -27,6 +27,11 @@ DEFAULT_QUARANTINE_FOLDER = "Quarantine"
 ENV_YAHOO_EMAIL_PREFIX = "EMAIL_CLEANER_YAHOO_EMAIL_"
 ENV_YAHOO_APP_PASSWORD_PREFIX = "EMAIL_CLEANER_YAHOO_APP_PASSWORD_"
 LEGACY_STATE_KEY = "__legacy_single_account__"
+AUTH_MECHANISMS = ("spf", "dkim", "dmarc")
+AUTH_RESULT_PATTERN = re.compile(
+    r"\b(?P<mechanism>spf|dkim|dmarc)\s*=\s*(?P<value>[a-z0-9_-]+)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -59,6 +64,7 @@ class DeletePatternRules:
     from_regex: tuple[RegexRule, ...]
     subject_regex: tuple[RegexRule, ...]
     body_regex: tuple[RegexRule, ...]
+    auth_triple_fail: bool
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,7 @@ class MessageSummary:
     subject: str
     date: str
     message_id: str
+    authentication_results: tuple[str, ...]
     size_bytes: int | None
     never_filter_match: bool
     never_filter_reason: str
@@ -414,6 +421,14 @@ def normalize_string_set(values: object) -> set[str]:
     return normalized
 
 
+def parse_boolean_rule(raw_value: object, source: str) -> bool:
+    if raw_value is None:
+        return False
+    if isinstance(raw_value, bool):
+        return raw_value
+    raise ValueError(f"{source} must be a boolean.")
+
+
 def compile_regex_rules(values: object, source_prefix: str) -> tuple[RegexRule, ...]:
     if values is None:
         return ()
@@ -457,7 +472,12 @@ def load_scanner_rules(path: Path) -> ScannerRules:
         return ScannerRules(
             never_filter=NeverFilterRules(senders=set(), domains=set()),
             always_delete=AlwaysDeleteRules(senders=set(), domains=set()),
-            delete_patterns=DeletePatternRules(from_regex=(), subject_regex=(), body_regex=()),
+            delete_patterns=DeletePatternRules(
+                from_regex=(),
+                subject_regex=(),
+                body_regex=(),
+                auth_triple_fail=False,
+            ),
         )
 
     try:
@@ -506,6 +526,10 @@ def load_scanner_rules(path: Path) -> ScannerRules:
                 delete_patterns.get("body_regex", []),
                 "delete_patterns.body_regex",
             ),
+            auth_triple_fail=parse_boolean_rule(
+                delete_patterns.get("auth_triple_fail", False),
+                "delete_patterns.auth_triple_fail",
+            ),
         ),
     )
 
@@ -538,6 +562,29 @@ def evaluate_never_filter(
     )
 
 
+def collect_auth_mechanism_results(auth_headers: Iterable[str]) -> dict[str, set[str]]:
+    statuses: dict[str, set[str]] = {mechanism: set() for mechanism in AUTH_MECHANISMS}
+    for header_value in auth_headers:
+        if not header_value:
+            continue
+        for match in AUTH_RESULT_PATTERN.finditer(header_value):
+            mechanism = match.group("mechanism").lower()
+            value = match.group("value").lower()
+            statuses[mechanism].add(value)
+    return statuses
+
+
+def evaluate_auth_triple_fail(summary: MessageSummary) -> tuple[bool, str]:
+    statuses = collect_auth_mechanism_results(summary.authentication_results)
+    # Conservative rule: require explicit fail for SPF, DKIM, and DMARC, with no
+    # conflicting result values in any mechanism.
+    for mechanism in AUTH_MECHANISMS:
+        mechanism_statuses = statuses.get(mechanism, set())
+        if mechanism_statuses != {"fail"}:
+            return False, ""
+    return True, "delete_patterns.auth_triple_fail:spf=fail,dkim=fail,dmarc=fail"
+
+
 def evaluate_delete_candidate(
     summary: MessageSummary,
     body_text: str,
@@ -552,6 +599,11 @@ def evaluate_delete_candidate(
     )
     if always_delete_match:
         return True, always_delete_reason
+
+    if scanner_rules.delete_patterns.auth_triple_fail:
+        auth_triple_fail_match, auth_reason = evaluate_auth_triple_fail(summary)
+        if auth_triple_fail_match:
+            return True, auth_reason
 
     for rule in scanner_rules.delete_patterns.from_regex:
         if summary.sender_name and rule.pattern.search(summary.sender_name):
@@ -817,7 +869,7 @@ def fetch_message_summary(
     status, fetch_data = imap.uid(
         "FETCH",
         uid,
-        "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)] RFC822.SIZE)",
+        "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID AUTHENTICATION-RESULTS)] RFC822.SIZE)",
     )
     if status != "OK" or fetch_data is None:
         return None
@@ -831,6 +883,10 @@ def fetch_message_summary(
     sender_name = extract_sender_name(sender)
     sender_email = extract_sender_email(sender)
     sender_domain = extract_domain(sender_email)
+    authentication_results = tuple(
+        decode_header_value(value)
+        for value in message.get_all("Authentication-Results", [])
+    )
     return MessageSummary(
         account_key=account.account_key,
         account_email=account.email,
@@ -844,6 +900,7 @@ def fetch_message_summary(
         subject=decode_header_value(message.get("Subject")),
         date=decode_header_value(message.get("Date")),
         message_id=decode_header_value(message.get("Message-ID")),
+        authentication_results=authentication_results,
         size_bytes=size_bytes,
         never_filter_match=False,
         never_filter_reason="",
@@ -1022,6 +1079,10 @@ def print_report(
         f"{len(scanner_rules.delete_patterns.from_regex)} from regex, "
         f"{len(scanner_rules.delete_patterns.subject_regex)} subject regex, "
         f"{len(scanner_rules.delete_patterns.body_regex)} body regex."
+    )
+    print(
+        "Loaded auth delete rule: "
+        f"auth_triple_fail={'enabled' if scanner_rules.delete_patterns.auth_triple_fail else 'disabled'}."
     )
     print(f"Never-filter protected message(s): {protected_count}")
     print(f"Delete-candidate message(s): {delete_candidate_count}")

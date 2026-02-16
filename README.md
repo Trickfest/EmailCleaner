@@ -117,6 +117,7 @@ Current rules support:
 
 - `never_filter`: specific sender addresses or sender domains that should never be filtered/deleted
 - `always_delete`: sender addresses or sender domains that should always be marked as delete candidates
+- `delete_patterns.auth_triple_fail`: marks as delete candidate only when `Authentication-Results` reports `spf=fail`, `dkim=fail`, and `dmarc=fail` with no conflicting status values
 - `delete_patterns`: regex rules for sender (`From`), subject, and message body that mark messages as delete candidates
 
 Example:
@@ -145,6 +146,7 @@ Example:
     ]
   },
   "delete_patterns": {
+    "auth_triple_fail": true,
     "from_regex": [
       "(?i)promo\\s+alerts",
       "(?i)noreply@deals-now\\.example"
@@ -167,19 +169,22 @@ Regex notes:
 - Matching uses `re.search` (pattern can match anywhere in the field)
 - You can embed flags inline (for example `(?i)` for case-insensitive)
 - `delete_patterns.from_regex` checks both sender display name and sender email address
+- `delete_patterns.auth_triple_fail` only matches when all of SPF, DKIM, and DMARC are explicitly `fail`
+- `delete_patterns.auth_triple_fail` is conservative: if any mechanism has no value or mixed values (for example both `fail` and `pass` in different headers), it does not match
 
 Rule precedence:
 
 1. `never_filter` (highest priority)
 2. `always_delete`
-3. `delete_patterns.from_regex`
-4. `delete_patterns.subject_regex`
-5. `delete_patterns.body_regex`
+3. `delete_patterns.auth_triple_fail`
+4. `delete_patterns.from_regex`
+5. `delete_patterns.subject_regex`
+6. `delete_patterns.body_regex`
 
 When new unread messages are pulled, each message is labeled as one of:
 
 - `NEVER_FILTER` (matches a protected sender/domain)
-- `DELETE_CANDIDATE` (matches always-delete or regex delete rule)
+- `DELETE_CANDIDATE` (matches always-delete, auth-triple-fail, or regex delete rule)
 - `FILTER_ELIGIBLE` (no rule match)
 
 Delete-candidate actions:
