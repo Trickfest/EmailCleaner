@@ -108,6 +108,15 @@ Dry-run mode (show what would happen, but make no mailbox/state changes):
 python3 yahoo_new_mail_poc.py --dry-run
 ```
 
+### 4. Run tests
+
+Install `pytest` (if needed), then run the suite:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest -q
+```
+
 ### Rules file (`rules.json`)
 
 Use `/Users/markharris/src/EmailCleaner/rules.example.json` as a template and copy it to a local `rules.json`.

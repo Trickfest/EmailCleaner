@@ -1,0 +1,10 @@
+From: "Promo Team" <promo@badmailer.example>
+To: recipient@example.test
+Subject: Suspicious auth results sample
+Date: Mon, 16 Feb 2026 10:10:00 -0500
+Message-ID: <auth-fail-001@example.test>
+Authentication-Results: mx.yahoo.com; spf=fail smtp.mailfrom=badmailer.example;
+Authentication-Results: mx.yahoo.com; dkim=fail header.d=badmailer.example;
+Authentication-Results: mx.yahoo.com; dmarc=fail header.from=badmailer.example;
+
+Authentication-Results are intentionally all fail.

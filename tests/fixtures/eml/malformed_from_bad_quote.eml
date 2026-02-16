@@ -1,0 +1,7 @@
+From: "Broken Sender <broken@example.test>
+To: recipient@example.test
+Subject: Malformed from header sample
+Date: Mon, 16 Feb 2026 10:05:00 -0500
+Message-ID: <malformed-from-001@example.test>
+
+This message has a malformed quoted sender.
