@@ -1,0 +1,42 @@
+{
+  "never_filter": {
+    "senders": [
+      "johnsmith.1@gmail.com",
+      "johnhsmith@yahoo.com"
+    ],
+    "domains": [
+      "bestbank.com",
+      "acmebrokerage.com",
+      "letsgoshopping.com"
+    ]
+  },
+  "always_delete": {
+    "senders": [
+      "promotions@deals-now.example",
+      "noreply@marketblast.example"
+    ],
+    "domains": [
+      "coupons.example",
+      "promo-outlet.example"
+    ]
+  },
+  "delete_patterns": {
+    "from_regex": [
+      "(?i)promo\\s+alerts",
+      "(?i)noreply@deals-now\\.example"
+    ],
+    "subject_regex": [
+      "(?i)limited\\s+time\\s+offer",
+      "(?i)act\\s+now\\s+and\\s+save",
+      "Cheap Cigars",
+      "(?i)gold",
+      "\\[JoeCoder/old-github-project\\]"
+    ],
+    "body_regex": [
+      "(?i)click\\s+here\\s+to\\s+claim\\s+your\\s+gift\\s+card",
+      "(?i)final\\s+notice:\\s+your\\s+account\\s+will\\s+be\\s+suspended",
+      "Cheap Cigars",
+      "(?i)discounted\\s+gold\\s+bars"
+    ]
+  }
+}
