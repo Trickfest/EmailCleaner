@@ -20,14 +20,55 @@ Yahoo IMAP login typically requires an app password.
 
 1. Sign in to Yahoo account security settings.
 2. Generate an app password for this script.
-3. Keep it handy for `YAHOO_APP_PASSWORD_1`.
+3. Keep it handy for account configuration.
 
-### 2. Set credentials
+### 2. Configure Yahoo accounts
+
+You can configure credentials using environment variables, `accounts.json`, or both.
+The scanner merges by account key suffix and requires a complete pair (`email` + `app_password`)
+for every discovered key.
+
+Environment variable format:
+
+- `EMAIL_CLEANER_YAHOO_EMAIL_<KEY>`
+- `EMAIL_CLEANER_YAHOO_APP_PASSWORD_<KEY>`
+
+Example (multiple accounts):
 
 ```bash
-export YAHOO_EMAIL_1="your_address@yahoo.com"
-export YAHOO_APP_PASSWORD_1="your_generated_app_password"
+export EMAIL_CLEANER_YAHOO_EMAIL_JOHN="john@yahoo.com"
+export EMAIL_CLEANER_YAHOO_APP_PASSWORD_JOHN="john_app_password"
+export EMAIL_CLEANER_YAHOO_EMAIL_SALLY="sally@yahoo.com"
+export EMAIL_CLEANER_YAHOO_APP_PASSWORD_SALLY="sally_app_password"
 ```
+
+Optional `accounts.json` format (see also `/Users/markharris/src/EmailCleaner/accounts.example.json`):
+
+```json
+{
+  "yahoo_accounts": {
+    "JOHN": {
+      "email": "john@yahoo.com",
+      "app_password": "john_app_password"
+    },
+    "SALLY": {
+      "email": "sally@yahoo.com",
+      "app_password": "sally_app_password"
+    }
+  }
+}
+```
+
+`accounts.json` is gitignored so local credentials stay out of source control.
+
+You can split credentials across env vars and `accounts.json` by account key.
+For example, `EMAIL_CLEANER_YAHOO_EMAIL_JOHN` in env and
+`yahoo_accounts.JOHN.app_password` in `accounts.json` is valid.
+
+Configuration errors are fatal when:
+
+- A key has only email or only app password after merging all sources
+- The same key/field is defined more than once (for example env + `accounts.json` both define email for `JOHN`)
 
 ### 3. Run the scanner
 
@@ -35,11 +76,14 @@ export YAHOO_APP_PASSWORD_1="your_generated_app_password"
 python3 yahoo_new_mail_poc.py
 ```
 
+The same `rules.json` is applied to all configured Yahoo accounts.
+
 Optional output and state controls:
 
 ```bash
 python3 yahoo_new_mail_poc.py \
   --rules-file rules.json \
+  --accounts-file accounts.json \
   --state-file .yahoo_mail_state.json \
   --json-output /tmp/new_messages.json
 ```
@@ -147,7 +191,7 @@ Delete-candidate actions:
 ### How "new messages" are handled
 
 - The script searches each folder for `UNSEEN` messages.
-- It stores processed message UIDs in a local state file.
+- It stores processed message UIDs in a local state file, namespaced by account key and folder.
 - In `--dry-run` mode, it does not update the local state file.
 - On later runs, it only returns unread messages with UIDs it has not already returned.
 - If a folder's `UIDVALIDITY` changes, that folder's processed UID history is reset automatically.

@@ -21,8 +21,12 @@ DEFAULT_IMAP_HOST = "imap.mail.yahoo.com"
 DEFAULT_IMAP_PORT = 993
 DEFAULT_STATE_FILE = ".yahoo_mail_state.json"
 DEFAULT_RULES_FILE = "rules.json"
+DEFAULT_ACCOUNTS_FILE = "accounts.json"
 DEFAULT_MAX_TRACKED_UIDS = 5000
 DEFAULT_QUARANTINE_FOLDER = "Quarantine"
+ENV_YAHOO_EMAIL_PREFIX = "EMAIL_CLEANER_YAHOO_EMAIL_"
+ENV_YAHOO_APP_PASSWORD_PREFIX = "EMAIL_CLEANER_YAHOO_APP_PASSWORD_"
+LEGACY_STATE_KEY = "__legacy_single_account__"
 
 
 @dataclass
@@ -64,8 +68,25 @@ class ScannerRules:
     delete_patterns: DeletePatternRules
 
 
+@dataclass(frozen=True)
+class YahooAccountCredentials:
+    account_key: str
+    email: str
+    app_password: str
+
+
+@dataclass
+class PartialYahooAccountCredentials:
+    email: str | None = None
+    app_password: str | None = None
+    email_source: str = ""
+    app_password_source: str = ""
+
+
 @dataclass
 class MessageSummary:
+    account_key: str
+    account_email: str
     folder: str
     uid: str
     sender: str
@@ -93,16 +114,6 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
-        "--email",
-        default=os.environ.get("YAHOO_EMAIL_1"),
-        help="Yahoo email address. Defaults to YAHOO_EMAIL_1 env var.",
-    )
-    parser.add_argument(
-        "--app-password",
-        default=os.environ.get("YAHOO_APP_PASSWORD_1"),
-        help="Yahoo app password. Defaults to YAHOO_APP_PASSWORD_1 env var.",
-    )
-    parser.add_argument(
         "--host",
         default=DEFAULT_IMAP_HOST,
         help=f"IMAP host (default: {DEFAULT_IMAP_HOST}).",
@@ -122,6 +133,14 @@ def parse_args() -> argparse.Namespace:
         "--rules-file",
         default=DEFAULT_RULES_FILE,
         help=f"Path to filtering rules JSON file (default: {DEFAULT_RULES_FILE}).",
+    )
+    parser.add_argument(
+        "--accounts-file",
+        default=DEFAULT_ACCOUNTS_FILE,
+        help=(
+            "Path to Yahoo accounts JSON file (default: accounts.json). "
+            "File is optional."
+        ),
     )
     parser.add_argument(
         "--max-tracked-uids",
@@ -180,6 +199,205 @@ def decode_header_value(value: str | None) -> str:
 def cli_option_was_set(option_name: str, argv: list[str]) -> bool:
     option_prefix = f"{option_name}="
     return any(arg == option_name or arg.startswith(option_prefix) for arg in argv)
+
+
+def normalize_account_key(raw_key: str, source: str) -> str:
+    key = raw_key.strip()
+    if not key:
+        raise ValueError(f"{source} has an empty account key suffix.")
+    if not re.fullmatch(r"[A-Za-z0-9_]+", key):
+        raise ValueError(
+            f"{source} has invalid account key {raw_key!r}. "
+            "Use only letters, numbers, and underscores."
+        )
+    return key.upper()
+
+
+def normalize_credential_value(raw_value: object, source: str, field_name: str) -> str:
+    if not isinstance(raw_value, str):
+        raise ValueError(f"{source} must be a string.")
+    value = raw_value.strip()
+    if not value:
+        raise ValueError(f"{source} cannot be empty.")
+    if field_name == "email":
+        return value.lower()
+    return value
+
+
+def set_account_credential(
+    accounts: dict[str, PartialYahooAccountCredentials],
+    account_key: str,
+    field_name: str,
+    field_value: str,
+    source: str,
+) -> None:
+    partial = accounts.setdefault(account_key, PartialYahooAccountCredentials())
+
+    if field_name == "email":
+        if partial.email is not None:
+            raise ValueError(
+                f"Duplicate email for Yahoo account key {account_key!r}. "
+                f"Already set from {partial.email_source}; duplicate from {source}."
+            )
+        partial.email = field_value
+        partial.email_source = source
+        return
+
+    if field_name == "app_password":
+        if partial.app_password is not None:
+            raise ValueError(
+                f"Duplicate app_password for Yahoo account key {account_key!r}. "
+                f"Already set from {partial.app_password_source}; duplicate from {source}."
+            )
+        partial.app_password = field_value
+        partial.app_password_source = source
+        return
+
+    raise ValueError(f"Unsupported account credential field: {field_name}")
+
+
+def load_accounts_from_env(
+    accounts: dict[str, PartialYahooAccountCredentials],
+) -> None:
+    for env_name, env_value in sorted(os.environ.items()):
+        if env_name.startswith(ENV_YAHOO_EMAIL_PREFIX):
+            key_suffix = env_name[len(ENV_YAHOO_EMAIL_PREFIX) :]
+            account_key = normalize_account_key(key_suffix, f"env var {env_name}")
+            email_address = normalize_credential_value(env_value, f"env var {env_name}", "email")
+            set_account_credential(
+                accounts,
+                account_key=account_key,
+                field_name="email",
+                field_value=email_address,
+                source=f"env var {env_name}",
+            )
+        elif env_name.startswith(ENV_YAHOO_APP_PASSWORD_PREFIX):
+            key_suffix = env_name[len(ENV_YAHOO_APP_PASSWORD_PREFIX) :]
+            account_key = normalize_account_key(key_suffix, f"env var {env_name}")
+            app_password = normalize_credential_value(
+                env_value,
+                f"env var {env_name}",
+                "app_password",
+            )
+            set_account_credential(
+                accounts,
+                account_key=account_key,
+                field_name="app_password",
+                field_value=app_password,
+                source=f"env var {env_name}",
+            )
+
+
+def load_accounts_from_file(
+    accounts_file_path: Path,
+    accounts: dict[str, PartialYahooAccountCredentials],
+) -> None:
+    if not accounts_file_path.exists():
+        return
+
+    try:
+        with accounts_file_path.open("r", encoding="utf-8") as file:
+            raw = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Could not read accounts file {accounts_file_path}: {error}") from error
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"Accounts file {accounts_file_path} must contain a JSON object.")
+
+    yahoo_accounts = raw.get("yahoo_accounts", {})
+    if yahoo_accounts is None:
+        yahoo_accounts = {}
+    if not isinstance(yahoo_accounts, dict):
+        raise ValueError(f"Accounts file {accounts_file_path} has invalid yahoo_accounts section.")
+
+    for raw_key, raw_account in yahoo_accounts.items():
+        if not isinstance(raw_key, str):
+            raise ValueError(
+                f"Accounts file {accounts_file_path} has non-string yahoo_accounts key."
+            )
+        if not isinstance(raw_account, dict):
+            raise ValueError(
+                f"Accounts file {accounts_file_path} yahoo_accounts.{raw_key} must be an object."
+            )
+
+        has_email = "email" in raw_account
+        has_password = "app_password" in raw_account
+        if not has_email and not has_password:
+            raise ValueError(
+                f"Accounts file {accounts_file_path} yahoo_accounts.{raw_key} must include "
+                "email and/or app_password."
+            )
+
+        account_key = normalize_account_key(raw_key, f"{accounts_file_path} yahoo_accounts.{raw_key}")
+        if has_email:
+            email_address = normalize_credential_value(
+                raw_account.get("email"),
+                f"{accounts_file_path} yahoo_accounts.{raw_key}.email",
+                "email",
+            )
+            set_account_credential(
+                accounts,
+                account_key=account_key,
+                field_name="email",
+                field_value=email_address,
+                source=f"{accounts_file_path} yahoo_accounts.{raw_key}.email",
+            )
+        if has_password:
+            app_password = normalize_credential_value(
+                raw_account.get("app_password"),
+                f"{accounts_file_path} yahoo_accounts.{raw_key}.app_password",
+                "app_password",
+            )
+            set_account_credential(
+                accounts,
+                account_key=account_key,
+                field_name="app_password",
+                field_value=app_password,
+                source=f"{accounts_file_path} yahoo_accounts.{raw_key}.app_password",
+            )
+
+
+def resolve_yahoo_accounts(accounts_file_path: Path) -> list[YahooAccountCredentials]:
+    partial_accounts: dict[str, PartialYahooAccountCredentials] = {}
+    load_accounts_from_env(partial_accounts)
+    load_accounts_from_file(accounts_file_path, partial_accounts)
+
+    if not partial_accounts:
+        raise ValueError(
+            "No Yahoo accounts configured. Set env vars with prefixes "
+            f"{ENV_YAHOO_EMAIL_PREFIX} and {ENV_YAHOO_APP_PASSWORD_PREFIX}, "
+            f"or define yahoo_accounts in {accounts_file_path}."
+        )
+
+    unresolved: list[str] = []
+    resolved_accounts: list[YahooAccountCredentials] = []
+    for account_key in sorted(partial_accounts):
+        partial = partial_accounts[account_key]
+        missing_fields: list[str] = []
+        if partial.email is None:
+            missing_fields.append("email")
+        if partial.app_password is None:
+            missing_fields.append("app_password")
+        if missing_fields:
+            unresolved.append(f"{account_key} (missing {', '.join(missing_fields)})")
+            continue
+
+        resolved_accounts.append(
+            YahooAccountCredentials(
+                account_key=account_key,
+                email=partial.email,
+                app_password=partial.app_password,
+            )
+        )
+
+    if unresolved:
+        unresolved_text = ", ".join(unresolved)
+        raise ValueError(
+            "Invalid Yahoo account configuration. Every discovered account key must have both "
+            f"email and app_password. Unresolved account keys: {unresolved_text}."
+        )
+
+    return resolved_accounts
 
 
 def normalize_string_set(values: object) -> set[str]:
@@ -488,7 +706,7 @@ def move_uid_to_mailbox(imap: imaplib.IMAP4_SSL, uid: str, target_folder: str) -
     return True, f"copied+expunged to {target_folder}"
 
 
-def load_state(path: Path) -> dict[str, dict[str, object]]:
+def load_state(path: Path) -> dict[str, dict[str, dict[str, object]]]:
     if not path.exists():
         return {}
 
@@ -498,14 +716,42 @@ def load_state(path: Path) -> dict[str, dict[str, object]]:
     except (OSError, json.JSONDecodeError):
         return {}
 
-    folders = raw.get("folders", {})
-    if not isinstance(folders, dict):
+    if not isinstance(raw, dict):
         return {}
-    return folders
+
+    accounts_section = raw.get("accounts")
+    if isinstance(accounts_section, dict):
+        accounts_state: dict[str, dict[str, dict[str, object]]] = {}
+        for account_key, account_payload in accounts_section.items():
+            if not isinstance(account_key, str) or not isinstance(account_payload, dict):
+                continue
+            folders = account_payload.get("folders", {})
+            if isinstance(folders, dict):
+                accounts_state[account_key] = folders
+        return accounts_state
+
+    folders = raw.get("folders", {})
+    if isinstance(folders, dict):
+        # Backward compatibility with the pre-multi-account state format.
+        return {LEGACY_STATE_KEY: folders}
+
+    return {}
 
 
-def save_state(path: Path, folders_state: dict[str, dict[str, object]]) -> None:
-    payload = {"folders": folders_state}
+def save_state(
+    path: Path,
+    accounts_state: dict[str, dict[str, dict[str, object]]],
+    accounts: list[YahooAccountCredentials],
+) -> None:
+    account_email_by_key = {account.account_key: account.email for account in accounts}
+    payload_accounts: dict[str, dict[str, object]] = {}
+    for account_key in sorted(accounts_state):
+        payload_accounts[account_key] = {
+            "email": account_email_by_key.get(account_key, ""),
+            "folders": accounts_state[account_key],
+        }
+
+    payload = {"accounts": payload_accounts}
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2, sort_keys=True)
 
@@ -562,7 +808,12 @@ def fetch_message_body_text(imap: imaplib.IMAP4_SSL, uid: str) -> str:
     return parse_fetch_body_text(fetch_data)
 
 
-def fetch_message_summary(imap: imaplib.IMAP4_SSL, folder_name: str, uid: str) -> MessageSummary | None:
+def fetch_message_summary(
+    imap: imaplib.IMAP4_SSL,
+    account: YahooAccountCredentials,
+    folder_name: str,
+    uid: str,
+) -> MessageSummary | None:
     status, fetch_data = imap.uid(
         "FETCH",
         uid,
@@ -581,6 +832,8 @@ def fetch_message_summary(imap: imaplib.IMAP4_SSL, folder_name: str, uid: str) -
     sender_email = extract_sender_email(sender)
     sender_domain = extract_domain(sender_email)
     return MessageSummary(
+        account_key=account.account_key,
+        account_email=account.email,
         folder=folder_name,
         uid=uid,
         sender=sender,
@@ -616,6 +869,7 @@ def select_folder(imap: imaplib.IMAP4_SSL, folder_name: str, readonly: bool) -> 
 
 def scan_new_messages(
     imap: imaplib.IMAP4_SSL,
+    account: YahooAccountCredentials,
     folders_state: dict[str, dict[str, object]],
     max_tracked_uids: int,
     scanner_rules: ScannerRules,
@@ -660,7 +914,7 @@ def scan_new_messages(
 
         for uid in new_uids:
             should_mark_processed = True
-            summary = fetch_message_summary(imap, folder.name, uid)
+            summary = fetch_message_summary(imap, account, folder.name, uid)
             if summary:
                 is_protected, protection_reason = evaluate_never_filter(
                     summary.sender_email,
@@ -727,6 +981,7 @@ def scan_new_messages(
 
 
 def print_report(
+    account: YahooAccountCredentials,
     messages: list[MessageSummary],
     scanned_folder_count: int,
     scanner_rules: ScannerRules,
@@ -747,6 +1002,7 @@ def print_report(
     would_quarantine_failed_count = sum(1 for message in messages if message.action == "WOULD_QUARANTINE_FAILED")
     filter_eligible_count = len(messages) - protected_count - delete_candidate_count
 
+    print(f"Account {account.account_key}: {account.email}")
     print(f"Scanned {scanned_folder_count} folder(s).")
     print(f"Found {len(messages)} new unread message(s).")
     if dry_run:
@@ -807,7 +1063,10 @@ def print_report(
                 action_detail += f" ({msg.action_reason})"
             detail_parts.append(action_detail)
         reason_suffix = f" | {' | '.join(detail_parts)}" if detail_parts else ""
-        print(f"- [{status}] [{msg.folder}] UID {msg.uid} | {subject} | {sender}{reason_suffix}")
+        print(
+            f"- [{msg.account_key}] [{status}] [{msg.folder}] UID {msg.uid} | {subject} | "
+            f"{sender}{reason_suffix}"
+        )
 
 
 def main() -> int:
@@ -817,11 +1076,10 @@ def main() -> int:
     if args.reset_app:
         argv = sys.argv[1:]
         disallowed_with_reset = [
-            "--email",
-            "--app-password",
             "--host",
             "--port",
             "--rules-file",
+            "--accounts-file",
             "--max-tracked-uids",
             "--json-output",
             "--hard-delete",
@@ -848,83 +1106,128 @@ def main() -> int:
             return 1
         return 0
 
-    if not args.email or not args.app_password:
-        print(
-            "Missing credentials. Provide --email and --app-password, or set "
-            "YAHOO_EMAIL_1 and YAHOO_APP_PASSWORD_1.",
-            file=sys.stderr,
-        )
-        return 2
-
-    folders_state = load_state(state_path)
     rules_path = Path(args.rules_file)
+    accounts_path = Path(args.accounts_file)
 
     try:
         scanner_rules = load_scanner_rules(rules_path)
+        yahoo_accounts = resolve_yahoo_accounts(accounts_path)
     except ValueError as error:
         print(error, file=sys.stderr)
         return 2
 
-    try:
-        context = ssl.create_default_context()
-        with imaplib.IMAP4_SSL(args.host, args.port, ssl_context=context) as imap:
-            imap.login(args.email, args.app_password)
+    accounts_state = load_state(state_path)
+    if LEGACY_STATE_KEY in accounts_state:
+        if len(yahoo_accounts) == 1 and yahoo_accounts[0].account_key not in accounts_state:
+            accounts_state[yahoo_accounts[0].account_key] = accounts_state.pop(LEGACY_STATE_KEY)
+        else:
+            accounts_state.pop(LEGACY_STATE_KEY, None)
 
-            quarantine_folder = DEFAULT_QUARANTINE_FOLDER
-            quarantine_will_be_created = False
-            if not args.hard_delete:
-                if args.dry_run:
-                    existing_mailbox = find_mailbox_name(imap, DEFAULT_QUARANTINE_FOLDER)
-                    if existing_mailbox:
-                        quarantine_folder = existing_mailbox
+    print(f"Configured Yahoo accounts: {len(yahoo_accounts)}")
+
+    all_messages: list[MessageSummary] = []
+    account_errors: list[str] = []
+    context = ssl.create_default_context()
+
+    for index, account in enumerate(yahoo_accounts):
+        if index:
+            print()
+
+        account_folders_state = accounts_state.get(account.account_key, {})
+        if not isinstance(account_folders_state, dict):
+            account_folders_state = {}
+
+        try:
+            with imaplib.IMAP4_SSL(args.host, args.port, ssl_context=context) as imap:
+                imap.login(account.email, account.app_password)
+
+                quarantine_folder = DEFAULT_QUARANTINE_FOLDER
+                quarantine_will_be_created = False
+                if not args.hard_delete:
+                    if args.dry_run:
+                        existing_mailbox = find_mailbox_name(imap, DEFAULT_QUARANTINE_FOLDER)
+                        if existing_mailbox:
+                            quarantine_folder = existing_mailbox
+                        else:
+                            quarantine_will_be_created = True
                     else:
-                        quarantine_will_be_created = True
-                else:
-                    try:
-                        quarantine_folder = ensure_mailbox_exists(imap, DEFAULT_QUARANTINE_FOLDER)
-                    except ValueError as error:
-                        print(error, file=sys.stderr)
-                        return 1
+                        try:
+                            quarantine_folder = ensure_mailbox_exists(imap, DEFAULT_QUARANTINE_FOLDER)
+                        except ValueError as error:
+                            print(
+                                f"[{account.account_key}] {error}",
+                                file=sys.stderr,
+                            )
+                            account_errors.append(
+                                f"{account.account_key} ({account.email}): {error}"
+                            )
+                            continue
 
-            messages, updated_state, scanned_count = scan_new_messages(
-                imap,
-                folders_state,
-                max_tracked_uids=max(1, args.max_tracked_uids),
-                scanner_rules=scanner_rules,
-                hard_delete=args.hard_delete,
-                dry_run=args.dry_run,
-                quarantine_folder=quarantine_folder,
-                quarantine_will_be_created=quarantine_will_be_created,
-            )
-            if args.dry_run:
-                print("Dry run enabled. Skipping state-file write.")
-            else:
-                save_state(state_path, updated_state)
-            print_report(
-                messages,
-                scanned_count,
-                scanner_rules,
-                hard_delete=args.hard_delete,
-                dry_run=args.dry_run,
-                quarantine_folder=quarantine_folder,
-                quarantine_will_be_created=quarantine_will_be_created,
-            )
-
-            if args.json_output:
-                output_path = Path(args.json_output)
-                output_path.write_text(
-                    json.dumps([asdict(msg) for msg in messages], indent=2),
-                    encoding="utf-8",
+                messages, updated_state, scanned_count = scan_new_messages(
+                    imap,
+                    account=account,
+                    folders_state=account_folders_state,
+                    max_tracked_uids=max(1, args.max_tracked_uids),
+                    scanner_rules=scanner_rules,
+                    hard_delete=args.hard_delete,
+                    dry_run=args.dry_run,
+                    quarantine_folder=quarantine_folder,
+                    quarantine_will_be_created=quarantine_will_be_created,
                 )
-                print(f"Wrote JSON output to {output_path}")
+                accounts_state[account.account_key] = updated_state
+                all_messages.extend(messages)
+                print_report(
+                    account=account,
+                    messages=messages,
+                    scanned_folder_count=scanned_count,
+                    scanner_rules=scanner_rules,
+                    hard_delete=args.hard_delete,
+                    dry_run=args.dry_run,
+                    quarantine_folder=quarantine_folder,
+                    quarantine_will_be_created=quarantine_will_be_created,
+                )
+        except imaplib.IMAP4.error as error:
+            print(
+                f"IMAP error for account {account.account_key} ({account.email}): {error}",
+                file=sys.stderr,
+            )
+            account_errors.append(f"{account.account_key} ({account.email}): IMAP error: {error}")
+        except OSError as error:
+            print(
+                f"Network or file error for account {account.account_key} ({account.email}): {error}",
+                file=sys.stderr,
+            )
+            account_errors.append(
+                f"{account.account_key} ({account.email}): network or file error: {error}"
+            )
 
-            imap.logout()
+    if args.dry_run:
+        print("Dry run enabled. Skipping state-file write.")
+    else:
+        try:
+            save_state(state_path, accounts_state, yahoo_accounts)
+        except OSError as error:
+            print(f"Could not write state file {state_path}: {error}", file=sys.stderr)
+            return 1
 
-    except imaplib.IMAP4.error as error:
-        print(f"IMAP error: {error}", file=sys.stderr)
-        return 1
-    except OSError as error:
-        print(f"Network or file error: {error}", file=sys.stderr)
+    if args.json_output:
+        output_path = Path(args.json_output)
+        try:
+            output_path.write_text(
+                json.dumps([asdict(msg) for msg in all_messages], indent=2),
+                encoding="utf-8",
+            )
+            print(f"Wrote JSON output to {output_path}")
+        except OSError as error:
+            print(f"Could not write JSON output at {output_path}: {error}", file=sys.stderr)
+            return 1
+
+    if account_errors:
+        print(
+            "One or more accounts failed: "
+            + "; ".join(account_errors),
+            file=sys.stderr,
+        )
         return 1
 
     return 0

@@ -1,0 +1,12 @@
+{
+  "yahoo_accounts": {
+    "JOHN": {
+      "email": "john@yahoo.com",
+      "app_password": "john_generated_app_password"
+    },
+    "SALLY": {
+      "email": "sally@yahoo.com",
+      "app_password": "sally_generated_app_password"
+    }
+  }
+}
