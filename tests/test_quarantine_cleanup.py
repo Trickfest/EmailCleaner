@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import yahoo_new_mail_poc as app
+import email_cleaner as app
 
 
 class CleanupIMAP:

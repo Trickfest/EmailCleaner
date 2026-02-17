@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-import yahoo_new_mail_poc as app
+import email_cleaner as app
 from tests.helpers import make_summary
 
 

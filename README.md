@@ -1,13 +1,13 @@
 # EmailCleaner
 
-Scan email accounts and delete suspected spam and junk email.
+Scan email accounts and quarantine suspected spam and junk email.
 
-## Yahoo Mail proof of concept
+EmailCleaner currently targets Yahoo Mail. Google Mail support is planned next, with more providers to follow.
 
-This repo now includes a Python proof-of-concept scanner:
+## Current Scanner
 
-- Script: `yahoo_new_mail_poc.py`
-- Purpose: log in to Yahoo Mail over IMAP and pull only **new unread** messages
+- Script: `email_cleaner.py`
+- Purpose: pull only **new unread** messages over IMAP (currently Yahoo Mail)
 - Folder scope: scans Inbox and other folders, while skipping Spam/Trash
 - Rules: loads filtering config from `rules.json` (default)
 - Optional OpenAI post-rule filtering config from `config.json` (default)
@@ -15,7 +15,7 @@ This repo now includes a Python proof-of-concept scanner:
 - `--hard-delete` is available as a future switch, but is currently a no-op placeholder
 - `--dry-run` simulates actions without moving/deleting messages or updating state
 
-### 1. Create a Yahoo app password
+### 1. Create an app password (current provider: Yahoo Mail)
 
 Yahoo IMAP login typically requires an app password.
 
@@ -23,7 +23,7 @@ Yahoo IMAP login typically requires an app password.
 2. Generate an app password for this script.
 3. Keep it handy for account configuration.
 
-### 2. Configure Yahoo accounts
+### 2. Configure accounts
 
 You can configure credentials using environment variables, `accounts.json`, or both.
 The scanner merges by account key suffix and requires a complete pair (`email` + `app_password`)
@@ -110,26 +110,28 @@ Behavior:
 ### 4. Run the scanner
 
 ```bash
-python3 yahoo_new_mail_poc.py
+python3 email_cleaner.py
 ```
 
-The same `rules.json` is applied to all configured Yahoo accounts.
+The same `rules.json` is applied to all configured accounts.
 
 Optional output and state controls:
 
 ```bash
-python3 yahoo_new_mail_poc.py \
+python3 email_cleaner.py \
   --rules-file rules.json \
   --accounts-file accounts.json \
   --config-file config.json \
-  --state-file .yahoo_mail_state.json \
+  --state-file .email_cleaner_state.json \
   --json-output /tmp/new_messages.json
 ```
+
+Default state path is `.email_cleaner_state.json`.
 
 Reset local app state (delete state file and exit):
 
 ```bash
-python3 yahoo_new_mail_poc.py --reset-app
+python3 email_cleaner.py --reset-app
 ```
 
 `--reset-app` is standalone mode: use only `--reset-app` and optional `--state-file`.
@@ -137,13 +139,13 @@ python3 yahoo_new_mail_poc.py --reset-app
 Hard-delete placeholder mode (currently no-op for delete candidates):
 
 ```bash
-python3 yahoo_new_mail_poc.py --hard-delete
+python3 email_cleaner.py --hard-delete
 ```
 
 Dry-run mode (show what would happen, but make no mailbox/state changes):
 
 ```bash
-python3 yahoo_new_mail_poc.py --dry-run
+python3 email_cleaner.py --dry-run
 ```
 
 ### 5. Run tests
@@ -244,7 +246,7 @@ When new unread messages are pulled, each message is labeled as one of:
 Delete-candidate actions:
 
 - Default: message is moved to `Quarantine`
-- `--hard-delete`: no-op placeholder (message is not deleted in this POC)
+- `--hard-delete`: no-op placeholder (message is not deleted yet)
 - `--dry-run`: no message move/delete; output shows what would happen in normal mode
 - OpenAI fallback can still be called in `--dry-run` mode, but mailbox/state remain unchanged
 
@@ -266,4 +268,4 @@ Quarantine cleanup behavior:
 
 - Default IMAP host: `imap.mail.yahoo.com`
 - Default port: `993`
-- Excluded folders include `Quarantine`, Yahoo `Bulk`, and folders identified as spam/trash/junk by IMAP flags or folder names containing `spam`, `trash`, `bulk`, or `junk` (case-insensitive).
+- Excluded folders include `Quarantine`, provider bulk folders (for Yahoo this includes `Bulk`), and folders identified as spam/trash/junk by IMAP flags or folder names containing `spam`, `trash`, `bulk`, or `junk` (case-insensitive).

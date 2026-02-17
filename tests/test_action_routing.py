@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-import yahoo_new_mail_poc as app
+import email_cleaner as app
 from tests.helpers import make_scanner_rules, make_summary
 
 
-ACCOUNT = app.YahooAccountCredentials(
+ACCOUNT = app.AccountCredentials(
     account_key="MAIN",
     email="main@example.test",
     app_password="app-password",

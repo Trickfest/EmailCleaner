@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from yahoo_new_mail_poc import (
-    YahooAccountCredentials,
+from email_cleaner import (
+    AccountCredentials,
     evaluate_malformed_from,
     fetch_message_summary,
 )
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "eml"
-ACCOUNT = YahooAccountCredentials(
+ACCOUNT = AccountCredentials(
     account_key="MAIN",
     email="main@example.test",
     app_password="app-password",

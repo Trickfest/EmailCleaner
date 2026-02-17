@@ -4,15 +4,15 @@
 These instructions apply to the entire repository.
 
 ## Project Purpose
-EmailCleaner is a Python IMAP scanner (Yahoo POC) that:
-- Loads one or more Yahoo accounts from environment variables and/or `accounts.json`
+EmailCleaner is a Python IMAP scanner that currently targets Yahoo Mail (with Google Mail support planned next) and:
+- Loads one or more accounts from environment variables and/or `accounts.json`
 - Pulls unread messages from allowed folders
 - Evaluates delete/keep rules from `rules.json`
 - Optionally applies OpenAI post-filtering from `config.json`
 - Moves delete candidates to `Quarantine` by default
 
 ## Primary Files
-- `yahoo_new_mail_poc.py`: main implementation
+- `email_cleaner.py`: main implementation
 - `README.md`: user-facing behavior and examples
 - `rules.example.json`: safe template for rules
 - `accounts.example.json`: safe template for account configuration
@@ -23,7 +23,7 @@ EmailCleaner is a Python IMAP scanner (Yahoo POC) that:
   - `rules.json`
   - `accounts.json`
   - `config.json`
-  - `.yahoo_mail_state.json`
+  - `.email_cleaner_state.json`
 - Keep examples in `rules.example.json` and `accounts.example.json` fictional/sanitized.
 - If docs need examples, use fictional values only.
 
@@ -70,13 +70,13 @@ When changing rule behavior:
 - Accounts are merged by account key from env + `accounts.json`.
 - Duplicate definitions for the same account field are treated as configuration errors.
 - State is namespaced by account key and folder.
-- Maintain legacy-state compatibility behavior unless intentionally removed.
+- Legacy state compatibility is intentionally removed; use `.email_cleaner_state.json`.
 
 ## Development Workflow
 Before finalizing changes:
-- Run `python3 -m py_compile yahoo_new_mail_poc.py`
+- Run `python3 -m py_compile email_cleaner.py`
 - Run `python3 -m pytest -q`
-- Check CLI help for new flags: `python3 yahoo_new_mail_poc.py --help`
+- Check CLI help for new flags: `python3 email_cleaner.py --help`
 - Prefer safe validation paths (`--dry-run`, temp state files) over live mailbox mutation.
 
 Anti-regression checklist:

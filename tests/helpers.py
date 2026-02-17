@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from yahoo_new_mail_poc import (
+from email_cleaner import (
     AlwaysDeleteRules,
     DeletePatternRules,
     MessageSummary,

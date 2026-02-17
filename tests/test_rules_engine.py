@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tests.helpers import make_scanner_rules, make_summary
-from yahoo_new_mail_poc import (
+from email_cleaner import (
     evaluate_auth_triple_fail,
     evaluate_delete_candidate,
     evaluate_malformed_from,
