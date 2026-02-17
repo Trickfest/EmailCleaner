@@ -21,6 +21,13 @@ def make_openai_config(*, threshold: float = 0.85) -> app.OpenAIConfig:
     )
 
 
+def make_app_config(*, max_tracked_uids: int = 5000) -> app.AppConfig:
+    return app.AppConfig(
+        openai=make_openai_config(),
+        max_tracked_uids=max_tracked_uids,
+    )
+
+
 class FakeHTTPResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self._raw = json.dumps(payload).encode("utf-8")
@@ -42,6 +49,7 @@ def test_load_app_config_defaults_when_file_missing(tmp_path) -> None:
     assert config.openai.model == "gpt-5-mini"
     assert config.openai.confidence_threshold == 0.85
     assert config.openai.system_prompt
+    assert config.max_tracked_uids == 5000
 
 
 def test_load_app_config_reads_openai_section(tmp_path) -> None:
@@ -49,6 +57,7 @@ def test_load_app_config_reads_openai_section(tmp_path) -> None:
     config_path.write_text(
         json.dumps(
             {
+                "max_tracked_uids": 1200,
                 "openai": {
                     "enabled": True,
                     "model": "gpt-5-mini",
@@ -72,6 +81,7 @@ def test_load_app_config_reads_openai_section(tmp_path) -> None:
     assert config.openai.timeout_seconds == 12
     assert config.openai.max_body_chars == 2500
     assert config.openai.max_subject_chars == 200
+    assert config.max_tracked_uids == 1200
 
 
 @pytest.mark.parametrize(
@@ -82,6 +92,8 @@ def test_load_app_config_reads_openai_section(tmp_path) -> None:
         ({"openai": {"max_body_chars": 0}}, "openai.max_body_chars"),
         ({"openai": {"enabled": "yes"}}, "openai.enabled"),
         ({"openai": {"system_prompt": 42}}, "openai.system_prompt"),
+        ({"max_tracked_uids": 0}, "max_tracked_uids"),
+        ({"max_tracked_uids": "1000"}, "max_tracked_uids"),
     ],
 )
 def test_load_app_config_rejects_invalid_values(tmp_path, payload: dict[str, object], match: str) -> None:
@@ -90,6 +102,36 @@ def test_load_app_config_rejects_invalid_values(tmp_path, payload: dict[str, obj
 
     with pytest.raises(ValueError, match=match):
         app.load_app_config(config_path)
+
+
+def test_resolve_effective_max_tracked_uids_uses_config_when_cli_not_set() -> None:
+    effective = app.resolve_effective_max_tracked_uids(
+        cli_max_tracked_uids=None,
+        app_config=make_app_config(max_tracked_uids=2345),
+        argv=["--config-file", "config.json"],
+    )
+
+    assert effective == 2345
+
+
+def test_resolve_effective_max_tracked_uids_prefers_cli_when_set() -> None:
+    effective = app.resolve_effective_max_tracked_uids(
+        cli_max_tracked_uids=999,
+        app_config=make_app_config(max_tracked_uids=2345),
+        argv=["--max-tracked-uids", "999"],
+    )
+
+    assert effective == 999
+
+
+def test_resolve_effective_max_tracked_uids_clamps_cli_value() -> None:
+    effective = app.resolve_effective_max_tracked_uids(
+        cli_max_tracked_uids=0,
+        app_config=make_app_config(max_tracked_uids=2345),
+        argv=["--max-tracked-uids=0"],
+    )
+
+    assert effective == 1
 
 
 def test_resolve_openai_api_key_requires_env(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -97,6 +97,7 @@ Example config:
 
 ```json
 {
+  "max_tracked_uids": 5000,
   "openai": {
     "enabled": true,
     "model": "gpt-5-mini",
@@ -117,6 +118,8 @@ Behavior:
 - `openai.system_prompt` is configurable in `config.json`.
 - If OpenAI returns `delete_candidate` below `confidence_threshold`, the message is kept.
 - If OpenAI request/parse fails, the message is kept.
+- `max_tracked_uids` configures the per-folder processed UID history limit in state.
+- `--max-tracked-uids` overrides `max_tracked_uids` for that run.
 
 ### 4. Run the scanner
 
@@ -287,6 +290,7 @@ Quarantine cleanup behavior:
 
 - The script searches each folder for `UNSEEN` messages.
 - It stores processed message UIDs in a local state file, namespaced by provider, account key, and folder.
+- Stored processed UID history is trimmed per folder to `max_tracked_uids` (default 5000).
 - In `--dry-run` mode, it does not update the local state file.
 - On later runs, it only returns unread messages with UIDs it has not already returned.
 - If a folder's `UIDVALIDITY` changes, that folder's processed UID history is reset automatically.

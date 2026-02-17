@@ -197,6 +197,7 @@ class OpenAIConfig:
 @dataclass(frozen=True)
 class AppConfig:
     openai: OpenAIConfig
+    max_tracked_uids: int
 
 
 @dataclass(frozen=True)
@@ -278,10 +279,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-tracked-uids",
-        default=DEFAULT_MAX_TRACKED_UIDS,
+        default=None,
         type=int,
         help=(
-            "Max processed UID history per folder to keep in state "
+            "Override max processed UID history per folder to keep in state. "
+            "If not set, uses config max_tracked_uids "
             f"(default: {DEFAULT_MAX_TRACKED_UIDS})."
         ),
     )
@@ -670,7 +672,8 @@ def default_app_config() -> AppConfig:
             timeout_seconds=DEFAULT_OPENAI_TIMEOUT_SECONDS,
             max_body_chars=DEFAULT_OPENAI_MAX_BODY_CHARS,
             max_subject_chars=DEFAULT_OPENAI_MAX_SUBJECT_CHARS,
-        )
+        ),
+        max_tracked_uids=DEFAULT_MAX_TRACKED_UIDS,
     )
 
 
@@ -788,7 +791,26 @@ def load_app_config(path: Path) -> AppConfig:
             openai_defaults.max_subject_chars,
         ),
     )
-    return AppConfig(openai=openai_config)
+    return AppConfig(
+        openai=openai_config,
+        max_tracked_uids=parse_positive_int_config(
+            raw.get("max_tracked_uids"),
+            "max_tracked_uids",
+            defaults.max_tracked_uids,
+        ),
+    )
+
+
+def resolve_effective_max_tracked_uids(
+    cli_max_tracked_uids: int | None,
+    app_config: AppConfig,
+    argv: list[str],
+) -> int:
+    if cli_option_was_set("--max-tracked-uids", argv):
+        if cli_max_tracked_uids is None:
+            return app_config.max_tracked_uids
+        return max(1, cli_max_tracked_uids)
+    return app_config.max_tracked_uids
 
 
 def resolve_openai_api_key(openai_config: OpenAIConfig) -> str | None:
@@ -2099,6 +2121,11 @@ def main() -> int:
         print(error, file=sys.stderr)
         return 2
 
+    effective_max_tracked_uids = resolve_effective_max_tracked_uids(
+        args.max_tracked_uids,
+        app_config,
+        argv,
+    )
     accounts_state = load_state(state_path)
 
     print(f"Configured accounts: {len(configured_accounts)}")
@@ -2155,7 +2182,7 @@ def main() -> int:
                     imap,
                     account=account,
                     folders_state=account_folders_state,
-                    max_tracked_uids=max(1, args.max_tracked_uids),
+                    max_tracked_uids=effective_max_tracked_uids,
                     scanner_rules=scanner_rules,
                     hard_delete=args.hard_delete,
                     dry_run=args.dry_run,

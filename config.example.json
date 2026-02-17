@@ -1,4 +1,5 @@
 {
+  "max_tracked_uids": 5000,
   "openai": {
     "enabled": false,
     "model": "gpt-5-mini",
