@@ -2,37 +2,40 @@
 
 Scan email accounts and quarantine suspected spam and junk email.
 
-EmailCleaner currently targets Yahoo Mail. Google Mail support is planned next, with more providers to follow.
+EmailCleaner currently supports Yahoo Mail and Gmail, with more providers planned.
 
 ## Current Scanner
 
 - Script: `email_cleaner.py`
-- Purpose: pull only **new unread** messages over IMAP (currently Yahoo Mail)
+- Purpose: pull only **new unread** messages over IMAP (currently Yahoo Mail + Gmail)
 - Folder scope: scans Inbox and other folders, while skipping Spam/Trash
 - Rules: loads filtering config from `rules.json` (default)
 - Optional OpenAI post-rule filtering config from `config.json` (default)
 - Delete candidates are moved to `Quarantine` by default (folder is auto-created if needed)
 - `--hard-delete` is available as a future switch, but is currently a no-op placeholder
 - `--dry-run` simulates actions without moving/deleting messages or updating state
+- Optional account filtering flags (`--provider`, `--account-key`) let you scan a subset of accounts
 
-### 1. Create an app password (current provider: Yahoo Mail)
+### 1. Create app passwords
 
-Yahoo IMAP login typically requires an app password.
+Both providers typically require app passwords for IMAP access.
 
-1. Sign in to Yahoo account security settings.
-2. Generate an app password for this script.
-3. Keep it handy for account configuration.
+1. Yahoo Mail: generate a Yahoo app password.
+2. Gmail: enable 2-Step Verification, then generate a Google app password.
+3. Keep both app passwords handy for account configuration.
 
 ### 2. Configure accounts
 
 You can configure credentials using environment variables, `accounts.json`, or both.
-The scanner merges by account key suffix and requires a complete pair (`email` + `app_password`)
+The scanner merges by provider + account key suffix and requires a complete pair (`email` + `app_password`)
 for every discovered key.
 
 Environment variable format:
 
 - `EMAIL_CLEANER_YAHOO_EMAIL_<KEY>`
 - `EMAIL_CLEANER_YAHOO_APP_PASSWORD_<KEY>`
+- `EMAIL_CLEANER_GMAIL_EMAIL_<KEY>`
+- `EMAIL_CLEANER_GMAIL_APP_PASSWORD_<KEY>`
 
 Example (multiple accounts):
 
@@ -41,6 +44,8 @@ export EMAIL_CLEANER_YAHOO_EMAIL_JOHN="john@yahoo.com"
 export EMAIL_CLEANER_YAHOO_APP_PASSWORD_JOHN="john_app_password"
 export EMAIL_CLEANER_YAHOO_EMAIL_SALLY="sally@yahoo.com"
 export EMAIL_CLEANER_YAHOO_APP_PASSWORD_SALLY="sally_app_password"
+export EMAIL_CLEANER_GMAIL_EMAIL_JANE="jane@gmail.com"
+export EMAIL_CLEANER_GMAIL_APP_PASSWORD_JANE="jane_app_password"
 ```
 
 Optional `accounts.json` format (see also `/Users/markharris/src/EmailCleaner/accounts.example.json`):
@@ -56,6 +61,12 @@ Optional `accounts.json` format (see also `/Users/markharris/src/EmailCleaner/ac
       "email": "sally@yahoo.com",
       "app_password": "sally_app_password"
     }
+  },
+  "gmail_accounts": {
+    "JANE": {
+      "email": "jane@gmail.com",
+      "app_password": "jane_app_password"
+    }
   }
 }
 ```
@@ -63,8 +74,8 @@ Optional `accounts.json` format (see also `/Users/markharris/src/EmailCleaner/ac
 `accounts.json` is gitignored so local credentials stay out of source control.
 
 You can split credentials across env vars and `accounts.json` by account key.
-For example, `EMAIL_CLEANER_YAHOO_EMAIL_JOHN` in env and
-`yahoo_accounts.JOHN.app_password` in `accounts.json` is valid.
+For example, `EMAIL_CLEANER_GMAIL_EMAIL_JANE` in env and
+`gmail_accounts.JANE.app_password` in `accounts.json` is valid.
 
 Configuration errors are fatal when:
 
@@ -127,6 +138,22 @@ python3 email_cleaner.py \
 ```
 
 Default state path is `.email_cleaner_state.json`.
+By default, EmailCleaner uses provider-specific IMAP hosts:
+
+- Yahoo: `imap.mail.yahoo.com`
+- Gmail: `imap.gmail.com`
+
+Use `--host` only if you want to override host selection for all accounts.
+
+Filter to a subset of accounts:
+
+```bash
+# Scan only Gmail accounts
+python3 email_cleaner.py --provider gmail
+
+# Scan only one account key within Gmail
+python3 email_cleaner.py --provider gmail --account-key JANE
+```
 
 Reset local app state (delete state file and exit):
 
@@ -259,13 +286,14 @@ Quarantine cleanup behavior:
 ### How "new messages" are handled
 
 - The script searches each folder for `UNSEEN` messages.
-- It stores processed message UIDs in a local state file, namespaced by account key and folder.
+- It stores processed message UIDs in a local state file, namespaced by provider, account key, and folder.
 - In `--dry-run` mode, it does not update the local state file.
 - On later runs, it only returns unread messages with UIDs it has not already returned.
 - If a folder's `UIDVALIDITY` changes, that folder's processed UID history is reset automatically.
 
 ### Notes
 
-- Default IMAP host: `imap.mail.yahoo.com`
+- Default IMAP host (Yahoo): `imap.mail.yahoo.com`
+- Default IMAP host (Gmail): `imap.gmail.com`
 - Default port: `993`
 - Excluded folders include `Quarantine`, provider bulk folders (for Yahoo this includes `Bulk`), and folders identified as spam/trash/junk by IMAP flags or folder names containing `spam`, `trash`, `bulk`, or `junk` (case-insensitive).

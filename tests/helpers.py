@@ -54,6 +54,7 @@ def make_summary(
     from_header_defects: tuple[str, ...] = (),
 ) -> MessageSummary:
     return MessageSummary(
+        account_provider="yahoo",
         account_key="MAIN",
         account_email="main@example.test",
         folder="INBOX",

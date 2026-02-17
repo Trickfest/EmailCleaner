@@ -8,5 +8,15 @@
       "email": "sally@yahoo.com",
       "app_password": "sally_generated_app_password"
     }
+  },
+  "gmail_accounts": {
+    "JANE": {
+      "email": "jane@gmail.com",
+      "app_password": "jane_generated_app_password"
+    },
+    "ROB": {
+      "email": "rob@gmail.com",
+      "app_password": "rob_generated_app_password"
+    }
   }
 }

@@ -7,6 +7,7 @@ from tests.helpers import make_scanner_rules, make_summary
 
 
 ACCOUNT = app.AccountCredentials(
+    provider="yahoo",
     account_key="MAIN",
     email="main@example.test",
     app_password="app-password",

@@ -22,7 +22,17 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_IMAP_HOST = "imap.mail.yahoo.com"
+PROVIDER_YAHOO = "yahoo"
+PROVIDER_GMAIL = "gmail"
+SUPPORTED_PROVIDERS = (PROVIDER_YAHOO, PROVIDER_GMAIL)
+PROVIDER_LABELS = {
+    PROVIDER_YAHOO: "Yahoo Mail",
+    PROVIDER_GMAIL: "Gmail",
+}
+DEFAULT_IMAP_HOST_BY_PROVIDER = {
+    PROVIDER_YAHOO: "imap.mail.yahoo.com",
+    PROVIDER_GMAIL: "imap.gmail.com",
+}
 DEFAULT_IMAP_PORT = 993
 DEFAULT_STATE_FILE = ".email_cleaner_state.json"
 DEFAULT_RULES_FILE = "rules.json"
@@ -39,8 +49,21 @@ DEFAULT_OPENAI_MAX_BODY_CHARS = 4000
 DEFAULT_OPENAI_MAX_SUBJECT_CHARS = 300
 ENV_YAHOO_EMAIL_PREFIX = "EMAIL_CLEANER_YAHOO_EMAIL_"
 ENV_YAHOO_APP_PASSWORD_PREFIX = "EMAIL_CLEANER_YAHOO_APP_PASSWORD_"
-ACCOUNTS_SECTION_KEY = "yahoo_accounts"
-CURRENT_PROVIDER_LABEL = "Yahoo Mail"
+ENV_GMAIL_EMAIL_PREFIX = "EMAIL_CLEANER_GMAIL_EMAIL_"
+ENV_GMAIL_APP_PASSWORD_PREFIX = "EMAIL_CLEANER_GMAIL_APP_PASSWORD_"
+ENV_EMAIL_PREFIX_BY_PROVIDER = {
+    PROVIDER_YAHOO: ENV_YAHOO_EMAIL_PREFIX,
+    PROVIDER_GMAIL: ENV_GMAIL_EMAIL_PREFIX,
+}
+ENV_APP_PASSWORD_PREFIX_BY_PROVIDER = {
+    PROVIDER_YAHOO: ENV_YAHOO_APP_PASSWORD_PREFIX,
+    PROVIDER_GMAIL: ENV_GMAIL_APP_PASSWORD_PREFIX,
+}
+ACCOUNTS_SECTION_BY_PROVIDER = {
+    PROVIDER_YAHOO: "yahoo_accounts",
+    PROVIDER_GMAIL: "gmail_accounts",
+}
+SUPPORTED_PROVIDER_LABELS_TEXT = ", ".join(PROVIDER_LABELS[provider] for provider in SUPPORTED_PROVIDERS)
 AUTH_MECHANISMS = ("spf", "dkim", "dmarc")
 AUTH_RESULT_PATTERN = re.compile(
     r"\b(?P<mechanism>spf|dkim|dmarc)\s*=\s*(?P<value>[a-z0-9_-]+)\b",
@@ -103,6 +126,7 @@ class ScannerRules:
 
 @dataclass(frozen=True)
 class AccountCredentials:
+    provider: str
     account_key: str
     email: str
     app_password: str
@@ -118,6 +142,7 @@ class PartialAccountCredentials:
 
 @dataclass
 class MessageSummary:
+    account_provider: str
     account_key: str
     account_email: str
     folder: str
@@ -185,16 +210,27 @@ class OpenAIDecision:
 
 
 def parse_args() -> argparse.Namespace:
+    provider_host_defaults = ", ".join(
+        f"{provider}={DEFAULT_IMAP_HOST_BY_PROVIDER[provider]}"
+        for provider in SUPPORTED_PROVIDERS
+    )
+    account_sections = ", ".join(
+        ACCOUNTS_SECTION_BY_PROVIDER[provider]
+        for provider in SUPPORTED_PROVIDERS
+    )
     parser = argparse.ArgumentParser(
         description=(
             "EmailCleaner scans newly discovered unread IMAP messages from all folders "
-            "except Spam/Trash. Current provider support: Yahoo Mail."
+            f"except Spam/Trash. Current provider support: {SUPPORTED_PROVIDER_LABELS_TEXT}."
         )
     )
     parser.add_argument(
         "--host",
-        default=DEFAULT_IMAP_HOST,
-        help=f"IMAP host (default: {DEFAULT_IMAP_HOST}).",
+        default="",
+        help=(
+            "Optional IMAP host override for all accounts. "
+            f"By default, uses provider-specific hosts ({provider_host_defaults})."
+        ),
     )
     parser.add_argument(
         "--port",
@@ -217,7 +253,22 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_ACCOUNTS_FILE,
         help=(
             "Path to accounts JSON file (default: accounts.json). "
-            f"Currently expects top-level {ACCOUNTS_SECTION_KEY} entries. File is optional."
+            f"Currently supports top-level sections: {account_sections}. File is optional."
+        ),
+    )
+    parser.add_argument(
+        "--provider",
+        default="",
+        type=str.lower,
+        choices=SUPPORTED_PROVIDERS,
+        help="Optional provider filter to scan only one provider (e.g. gmail).",
+    )
+    parser.add_argument(
+        "--account-key",
+        default="",
+        help=(
+            "Optional account-key filter to scan only one account key "
+            "(case-insensitive; combined with --provider when provided)."
         ),
     )
     parser.add_argument(
@@ -284,6 +335,24 @@ def cli_option_was_set(option_name: str, argv: list[str]) -> bool:
     return any(arg == option_name or arg.startswith(option_prefix) for arg in argv)
 
 
+def account_reference(provider: str, account_key: str) -> str:
+    return f"{provider}.{account_key}"
+
+
+def account_state_key(provider: str, account_key: str) -> str:
+    return f"{provider}:{account_key}"
+
+
+def resolve_imap_host(provider: str, host_override: str) -> str:
+    override = host_override.strip()
+    if override:
+        return override
+    host = DEFAULT_IMAP_HOST_BY_PROVIDER.get(provider)
+    if host:
+        return host
+    raise ValueError(f"Unsupported provider {provider!r} for IMAP host selection.")
+
+
 def normalize_account_key(raw_key: str, source: str) -> str:
     key = raw_key.strip()
     if not key:
@@ -308,18 +377,21 @@ def normalize_credential_value(raw_value: object, source: str, field_name: str) 
 
 
 def set_account_credential(
-    accounts: dict[str, PartialAccountCredentials],
+    accounts: dict[tuple[str, str], PartialAccountCredentials],
+    provider: str,
     account_key: str,
     field_name: str,
     field_value: str,
     source: str,
 ) -> None:
-    partial = accounts.setdefault(account_key, PartialAccountCredentials())
+    key = (provider, account_key)
+    ref_text = account_reference(provider, account_key)
+    partial = accounts.setdefault(key, PartialAccountCredentials())
 
     if field_name == "email":
         if partial.email is not None:
             raise ValueError(
-                f"Duplicate email for account key {account_key!r}. "
+                f"Duplicate email for account {ref_text!r}. "
                 f"Already set from {partial.email_source}; duplicate from {source}."
             )
         partial.email = field_value
@@ -329,7 +401,7 @@ def set_account_credential(
     if field_name == "app_password":
         if partial.app_password is not None:
             raise ValueError(
-                f"Duplicate app_password for account key {account_key!r}. "
+                f"Duplicate app_password for account {ref_text!r}. "
                 f"Already set from {partial.app_password_source}; duplicate from {source}."
             )
         partial.app_password = field_value
@@ -340,7 +412,7 @@ def set_account_credential(
 
 
 def load_accounts_from_env(
-    accounts: dict[str, PartialAccountCredentials],
+    accounts: dict[tuple[str, str], PartialAccountCredentials],
 ) -> None:
     for env_name, env_value in sorted(os.environ.items()):
         if env_name.startswith(ENV_YAHOO_EMAIL_PREFIX):
@@ -349,6 +421,7 @@ def load_accounts_from_env(
             email_address = normalize_credential_value(env_value, f"env var {env_name}", "email")
             set_account_credential(
                 accounts,
+                provider=PROVIDER_YAHOO,
                 account_key=account_key,
                 field_name="email",
                 field_value=email_address,
@@ -364,6 +437,35 @@ def load_accounts_from_env(
             )
             set_account_credential(
                 accounts,
+                provider=PROVIDER_YAHOO,
+                account_key=account_key,
+                field_name="app_password",
+                field_value=app_password,
+                source=f"env var {env_name}",
+            )
+        elif env_name.startswith(ENV_GMAIL_EMAIL_PREFIX):
+            key_suffix = env_name[len(ENV_GMAIL_EMAIL_PREFIX) :]
+            account_key = normalize_account_key(key_suffix, f"env var {env_name}")
+            email_address = normalize_credential_value(env_value, f"env var {env_name}", "email")
+            set_account_credential(
+                accounts,
+                provider=PROVIDER_GMAIL,
+                account_key=account_key,
+                field_name="email",
+                field_value=email_address,
+                source=f"env var {env_name}",
+            )
+        elif env_name.startswith(ENV_GMAIL_APP_PASSWORD_PREFIX):
+            key_suffix = env_name[len(ENV_GMAIL_APP_PASSWORD_PREFIX) :]
+            account_key = normalize_account_key(key_suffix, f"env var {env_name}")
+            app_password = normalize_credential_value(
+                env_value,
+                f"env var {env_name}",
+                "app_password",
+            )
+            set_account_credential(
+                accounts,
+                provider=PROVIDER_GMAIL,
                 account_key=account_key,
                 field_name="app_password",
                 field_value=app_password,
@@ -373,7 +475,7 @@ def load_accounts_from_env(
 
 def load_accounts_from_file(
     accounts_file_path: Path,
-    accounts: dict[str, PartialAccountCredentials],
+    accounts: dict[tuple[str, str], PartialAccountCredentials],
 ) -> None:
     if not accounts_file_path.exists():
         return
@@ -387,92 +489,107 @@ def load_accounts_from_file(
     if not isinstance(raw, dict):
         raise ValueError(f"Accounts file {accounts_file_path} must contain a JSON object.")
 
-    provider_accounts = raw.get(ACCOUNTS_SECTION_KEY, {})
-    if provider_accounts is None:
-        provider_accounts = {}
-    if not isinstance(provider_accounts, dict):
-        raise ValueError(
-            f"Accounts file {accounts_file_path} has invalid {ACCOUNTS_SECTION_KEY} section."
-        )
-
-    for raw_key, raw_account in provider_accounts.items():
-        if not isinstance(raw_key, str):
+    for provider in SUPPORTED_PROVIDERS:
+        section_key = ACCOUNTS_SECTION_BY_PROVIDER[provider]
+        provider_accounts = raw.get(section_key, {})
+        if provider_accounts is None:
+            provider_accounts = {}
+        if not isinstance(provider_accounts, dict):
             raise ValueError(
-                f"Accounts file {accounts_file_path} has non-string {ACCOUNTS_SECTION_KEY} key."
-            )
-        if not isinstance(raw_account, dict):
-            raise ValueError(
-                f"Accounts file {accounts_file_path} {ACCOUNTS_SECTION_KEY}.{raw_key} must be an object."
+                f"Accounts file {accounts_file_path} has invalid {section_key} section."
             )
 
-        has_email = "email" in raw_account
-        has_password = "app_password" in raw_account
-        if not has_email and not has_password:
-            raise ValueError(
-                f"Accounts file {accounts_file_path} {ACCOUNTS_SECTION_KEY}.{raw_key} must include "
-                "email and/or app_password."
-            )
+        for raw_key, raw_account in provider_accounts.items():
+            if not isinstance(raw_key, str):
+                raise ValueError(
+                    f"Accounts file {accounts_file_path} has non-string {section_key} key."
+                )
+            if not isinstance(raw_account, dict):
+                raise ValueError(
+                    f"Accounts file {accounts_file_path} {section_key}.{raw_key} must be an object."
+                )
 
-        account_key = normalize_account_key(
-            raw_key,
-            f"{accounts_file_path} {ACCOUNTS_SECTION_KEY}.{raw_key}",
-        )
-        if has_email:
-            email_address = normalize_credential_value(
-                raw_account.get("email"),
-                f"{accounts_file_path} {ACCOUNTS_SECTION_KEY}.{raw_key}.email",
-                "email",
+            has_email = "email" in raw_account
+            has_password = "app_password" in raw_account
+            if not has_email and not has_password:
+                raise ValueError(
+                    f"Accounts file {accounts_file_path} {section_key}.{raw_key} must include "
+                    "email and/or app_password."
+                )
+
+            account_key = normalize_account_key(
+                raw_key,
+                f"{accounts_file_path} {section_key}.{raw_key}",
             )
-            set_account_credential(
-                accounts,
-                account_key=account_key,
-                field_name="email",
-                field_value=email_address,
-                source=f"{accounts_file_path} {ACCOUNTS_SECTION_KEY}.{raw_key}.email",
-            )
-        if has_password:
-            app_password = normalize_credential_value(
-                raw_account.get("app_password"),
-                f"{accounts_file_path} {ACCOUNTS_SECTION_KEY}.{raw_key}.app_password",
-                "app_password",
-            )
-            set_account_credential(
-                accounts,
-                account_key=account_key,
-                field_name="app_password",
-                field_value=app_password,
-                source=f"{accounts_file_path} {ACCOUNTS_SECTION_KEY}.{raw_key}.app_password",
-            )
+            if has_email:
+                email_address = normalize_credential_value(
+                    raw_account.get("email"),
+                    f"{accounts_file_path} {section_key}.{raw_key}.email",
+                    "email",
+                )
+                set_account_credential(
+                    accounts,
+                    provider=provider,
+                    account_key=account_key,
+                    field_name="email",
+                    field_value=email_address,
+                    source=f"{accounts_file_path} {section_key}.{raw_key}.email",
+                )
+            if has_password:
+                app_password = normalize_credential_value(
+                    raw_account.get("app_password"),
+                    f"{accounts_file_path} {section_key}.{raw_key}.app_password",
+                    "app_password",
+                )
+                set_account_credential(
+                    accounts,
+                    provider=provider,
+                    account_key=account_key,
+                    field_name="app_password",
+                    field_value=app_password,
+                    source=f"{accounts_file_path} {section_key}.{raw_key}.app_password",
+                )
 
 
 def resolve_accounts(accounts_file_path: Path) -> list[AccountCredentials]:
-    partial_accounts: dict[str, PartialAccountCredentials] = {}
+    partial_accounts: dict[tuple[str, str], PartialAccountCredentials] = {}
     load_accounts_from_env(partial_accounts)
     load_accounts_from_file(accounts_file_path, partial_accounts)
 
     if not partial_accounts:
+        env_prefix_text = ", ".join(
+            f"{ENV_EMAIL_PREFIX_BY_PROVIDER[provider]} and {ENV_APP_PASSWORD_PREFIX_BY_PROVIDER[provider]}"
+            for provider in SUPPORTED_PROVIDERS
+        )
+        section_text = ", ".join(
+            ACCOUNTS_SECTION_BY_PROVIDER[provider]
+            for provider in SUPPORTED_PROVIDERS
+        )
         raise ValueError(
             "No accounts configured. Set env vars with prefixes "
-            f"{ENV_YAHOO_EMAIL_PREFIX} and {ENV_YAHOO_APP_PASSWORD_PREFIX}, "
-            f"or define {ACCOUNTS_SECTION_KEY} in {accounts_file_path}. "
-            f"Current provider support: {CURRENT_PROVIDER_LABEL}."
+            f"{env_prefix_text}, "
+            f"or define {section_text} in {accounts_file_path}. "
+            f"Current provider support: {SUPPORTED_PROVIDER_LABELS_TEXT}."
         )
 
     unresolved: list[str] = []
     resolved_accounts: list[AccountCredentials] = []
-    for account_key in sorted(partial_accounts):
-        partial = partial_accounts[account_key]
+    for provider, account_key in sorted(partial_accounts):
+        partial = partial_accounts[(provider, account_key)]
         missing_fields: list[str] = []
         if partial.email is None:
             missing_fields.append("email")
         if partial.app_password is None:
             missing_fields.append("app_password")
         if missing_fields:
-            unresolved.append(f"{account_key} (missing {', '.join(missing_fields)})")
+            unresolved.append(
+                f"{account_reference(provider, account_key)} (missing {', '.join(missing_fields)})"
+            )
             continue
 
         resolved_accounts.append(
             AccountCredentials(
+                provider=provider,
                 account_key=account_key,
                 email=partial.email,
                 app_password=partial.app_password,
@@ -487,6 +604,45 @@ def resolve_accounts(accounts_file_path: Path) -> list[AccountCredentials]:
         )
 
     return resolved_accounts
+
+
+def filter_accounts(
+    accounts: list[AccountCredentials],
+    provider_filter: str,
+    account_key_filter: str,
+) -> list[AccountCredentials]:
+    provider = provider_filter.strip().lower()
+    if provider and provider not in SUPPORTED_PROVIDERS:
+        supported = ", ".join(SUPPORTED_PROVIDERS)
+        raise ValueError(
+            f"Unsupported provider filter {provider_filter!r}. Expected one of: {supported}."
+        )
+
+    account_key = ""
+    if account_key_filter.strip():
+        account_key = normalize_account_key(account_key_filter, "--account-key")
+
+    filtered: list[AccountCredentials] = []
+    for account in accounts:
+        if provider and account.provider != provider:
+            continue
+        if account_key and account.account_key != account_key:
+            continue
+        filtered.append(account)
+
+    if filtered:
+        return filtered
+
+    filter_parts: list[str] = []
+    if provider:
+        filter_parts.append(f"provider={provider}")
+    if account_key:
+        filter_parts.append(f"account_key={account_key}")
+    filter_text = ", ".join(filter_parts) if filter_parts else "no filters"
+    available_text = ", ".join(
+        f"{account.provider}:{account.account_key}" for account in accounts
+    ) or "none"
+    raise ValueError(f"No accounts matched ({filter_text}). Available accounts: {available_text}.")
 
 
 def normalize_string_set(values: object) -> set[str]:
@@ -1299,12 +1455,25 @@ def save_state(
     accounts_state: dict[str, dict[str, dict[str, object]]],
     accounts: list[AccountCredentials],
 ) -> None:
-    account_email_by_key = {account.account_key: account.email for account in accounts}
+    account_by_state_key = {
+        account_state_key(account.provider, account.account_key): account
+        for account in accounts
+    }
     payload_accounts: dict[str, dict[str, object]] = {}
-    for account_key in sorted(accounts_state):
-        payload_accounts[account_key] = {
-            "email": account_email_by_key.get(account_key, ""),
-            "folders": accounts_state[account_key],
+    for state_key in sorted(accounts_state):
+        account = account_by_state_key.get(state_key)
+        if account:
+            provider = account.provider
+            account_key = account.account_key
+            email_address = account.email
+        else:
+            provider, _separator, account_key = state_key.partition(":")
+            email_address = ""
+        payload_accounts[state_key] = {
+            "provider": provider,
+            "account_key": account_key,
+            "email": email_address,
+            "folders": accounts_state[state_key],
         }
 
     payload = {"accounts": payload_accounts}
@@ -1534,6 +1703,7 @@ def fetch_message_summary(
         for value in message.get_all("Authentication-Results", [])
     )
     return MessageSummary(
+        account_provider=account.provider,
         account_key=account.account_key,
         account_email=account.email,
         folder=folder_name,
@@ -1744,7 +1914,8 @@ def print_report(
     )
     filter_eligible_count = len(messages) - protected_count - delete_candidate_count
 
-    print(f"Account {account.account_key}: {account.email}")
+    account_label = f"{account.provider}:{account.account_key}"
+    print(f"Account {account_label}: {account.email}")
     print(f"Scanned {scanned_folder_count} folder(s).")
     print(f"Found {len(messages)} new unread message(s).")
     if dry_run:
@@ -1863,7 +2034,8 @@ def print_report(
             detail_parts.append(llm_detail)
         reason_suffix = f" | {' | '.join(detail_parts)}" if detail_parts else ""
         print(
-            f"- [{msg.account_key}] [{status}] [{msg.folder}] UID {msg.uid} | {subject} | "
+            f"- [{msg.account_provider}:{msg.account_key}] [{status}] [{msg.folder}] "
+            f"UID {msg.uid} | {subject} | "
             f"{sender}{reason_suffix}"
         )
 
@@ -1871,6 +2043,7 @@ def print_report(
 def main() -> int:
     args = parse_args()
     argv = sys.argv[1:]
+    host_override = args.host.strip()
     state_path = Path(args.state_file)
 
     if args.reset_app:
@@ -1879,6 +2052,8 @@ def main() -> int:
             "--port",
             "--rules-file",
             "--accounts-file",
+            "--provider",
+            "--account-key",
             "--config-file",
             "--max-tracked-uids",
             "--json-output",
@@ -1915,16 +2090,25 @@ def main() -> int:
         openai_api_key = resolve_openai_api_key(app_config.openai)
         scanner_rules = load_scanner_rules(rules_path)
         configured_accounts = resolve_accounts(accounts_path)
+        configured_accounts = filter_accounts(
+            configured_accounts,
+            provider_filter=args.provider,
+            account_key_filter=args.account_key,
+        )
     except ValueError as error:
         print(error, file=sys.stderr)
         return 2
 
     accounts_state = load_state(state_path)
 
-    print(
-        f"Configured accounts: {len(configured_accounts)} "
-        f"(current provider: {CURRENT_PROVIDER_LABEL})"
-    )
+    print(f"Configured accounts: {len(configured_accounts)}")
+    if args.provider or args.account_key:
+        applied_filters: list[str] = []
+        if args.provider:
+            applied_filters.append(f"provider={args.provider}")
+        if args.account_key:
+            applied_filters.append(f"account_key={normalize_account_key(args.account_key, '--account-key')}")
+        print(f"Applied account filters: {', '.join(applied_filters)}")
 
     all_messages: list[MessageSummary] = []
     account_errors: list[str] = []
@@ -1934,12 +2118,15 @@ def main() -> int:
         if index:
             print()
 
-        account_folders_state = accounts_state.get(account.account_key, {})
+        state_key = account_state_key(account.provider, account.account_key)
+        account_folders_state = accounts_state.get(state_key, {})
         if not isinstance(account_folders_state, dict):
             account_folders_state = {}
+        account_label = f"{account.provider}:{account.account_key}"
 
         try:
-            with imaplib.IMAP4_SSL(args.host, args.port, ssl_context=context) as imap:
+            imap_host = resolve_imap_host(account.provider, host_override)
+            with imaplib.IMAP4_SSL(imap_host, args.port, ssl_context=context) as imap:
                 imap.login(account.email, account.app_password)
 
                 quarantine_folder = DEFAULT_QUARANTINE_FOLDER
@@ -1956,11 +2143,11 @@ def main() -> int:
                             quarantine_folder = ensure_mailbox_exists(imap, DEFAULT_QUARANTINE_FOLDER)
                         except ValueError as error:
                             print(
-                                f"[{account.account_key}] {error}",
+                                f"[{account_label}] {error}",
                                 file=sys.stderr,
                             )
                             account_errors.append(
-                                f"{account.account_key} ({account.email}): {error}"
+                                f"{account_label} ({account.email}): {error}"
                             )
                             continue
 
@@ -1983,7 +2170,7 @@ def main() -> int:
                     cleanup_days=scanner_rules.quarantine_cleanup_days,
                     dry_run=args.dry_run,
                 )
-                accounts_state[account.account_key] = updated_state
+                accounts_state[state_key] = updated_state
                 all_messages.extend(messages)
                 print_report(
                     account=account,
@@ -1999,17 +2186,17 @@ def main() -> int:
                 )
         except imaplib.IMAP4.error as error:
             print(
-                f"IMAP error for account {account.account_key} ({account.email}): {error}",
+                f"IMAP error for account {account_label} ({account.email}): {error}",
                 file=sys.stderr,
             )
-            account_errors.append(f"{account.account_key} ({account.email}): IMAP error: {error}")
+            account_errors.append(f"{account_label} ({account.email}): IMAP error: {error}")
         except OSError as error:
             print(
-                f"Network or file error for account {account.account_key} ({account.email}): {error}",
+                f"Network or file error for account {account_label} ({account.email}): {error}",
                 file=sys.stderr,
             )
             account_errors.append(
-                f"{account.account_key} ({account.email}): network or file error: {error}"
+                f"{account_label} ({account.email}): network or file error: {error}"
             )
 
     if args.dry_run:

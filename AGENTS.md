@@ -4,7 +4,7 @@
 These instructions apply to the entire repository.
 
 ## Project Purpose
-EmailCleaner is a Python IMAP scanner that currently targets Yahoo Mail (with Google Mail support planned next) and:
+EmailCleaner is a Python IMAP scanner that currently supports Yahoo Mail and Gmail, and:
 - Loads one or more accounts from environment variables and/or `accounts.json`
 - Pulls unread messages from allowed folders
 - Evaluates delete/keep rules from `rules.json`
@@ -67,9 +67,9 @@ When changing rule behavior:
 - Preserve backward-compatible behavior where possible.
 
 ## Accounts And State
-- Accounts are merged by account key from env + `accounts.json`.
+- Accounts are merged by provider + account key from env + `accounts.json`.
 - Duplicate definitions for the same account field are treated as configuration errors.
-- State is namespaced by account key and folder.
+- State is namespaced by provider, account key, and folder.
 - Legacy state compatibility is intentionally removed; use `.email_cleaner_state.json`.
 
 ## Development Workflow

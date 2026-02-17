@@ -11,6 +11,7 @@ from email_cleaner import (
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "eml"
 ACCOUNT = AccountCredentials(
+    provider="yahoo",
     account_key="MAIN",
     email="main@example.test",
     app_password="app-password",
