@@ -6,6 +6,7 @@ These instructions apply to the entire repository.
 ## Project Purpose
 EmailCleaner is a Python IMAP scanner that currently supports Yahoo Mail and Gmail, and:
 - Loads one or more accounts from environment variables and/or `accounts.json`
+- Supports targeted scans via `--provider` and `--account-key`
 - Pulls unread messages from allowed folders
 - Evaluates delete/keep rules from `rules.json`
 - Optionally applies OpenAI post-filtering from `config.json`
@@ -30,6 +31,7 @@ EmailCleaner is a Python IMAP scanner that currently supports Yahoo Mail and Gma
 ## Behavioral Invariants
 Keep these semantics unless explicitly asked to change them:
 - Default delete action is move-to-`Quarantine` (create folder if missing).
+- Default IMAP host is provider-specific (`yahoo` -> `imap.mail.yahoo.com`, `gmail` -> `imap.gmail.com`) unless `--host` override is set.
 - Optional `quarantine_cleanup_days` deletes old messages from `Quarantine`; if unset/null, cleanup is disabled.
 - `--hard-delete` is currently a no-op placeholder for delete candidates.
 - `--dry-run` performs no mailbox mutations and does not write state.
@@ -68,6 +70,7 @@ When changing rule behavior:
 
 ## Accounts And State
 - Accounts are merged by provider + account key from env + `accounts.json`.
+- `accounts.json` provider sections are `yahoo_accounts` and `gmail_accounts`.
 - Duplicate definitions for the same account field are treated as configuration errors.
 - State is namespaced by provider, account key, and folder.
 - Legacy state compatibility is intentionally removed; use `.email_cleaner_state.json`.
