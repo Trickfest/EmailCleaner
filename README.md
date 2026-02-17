@@ -40,31 +40,31 @@ Environment variable format:
 Example (multiple accounts):
 
 ```bash
-export EMAIL_CLEANER_YAHOO_EMAIL_JOHN="john@yahoo.com"
+export EMAIL_CLEANER_YAHOO_EMAIL_JOHN="john@yahoo.example"
 export EMAIL_CLEANER_YAHOO_APP_PASSWORD_JOHN="john_app_password"
-export EMAIL_CLEANER_YAHOO_EMAIL_SALLY="sally@yahoo.com"
+export EMAIL_CLEANER_YAHOO_EMAIL_SALLY="sally@yahoo.example"
 export EMAIL_CLEANER_YAHOO_APP_PASSWORD_SALLY="sally_app_password"
-export EMAIL_CLEANER_GMAIL_EMAIL_JANE="jane@gmail.com"
+export EMAIL_CLEANER_GMAIL_EMAIL_JANE="jane@gmail.example"
 export EMAIL_CLEANER_GMAIL_APP_PASSWORD_JANE="jane_app_password"
 ```
 
-Optional `accounts.json` format (see also `/Users/markharris/src/EmailCleaner/accounts.example.json`):
+Optional `accounts.json` format (see also `accounts.example.json`):
 
 ```json
 {
   "yahoo_accounts": {
     "JOHN": {
-      "email": "john@yahoo.com",
+      "email": "john@yahoo.example",
       "app_password": "john_app_password"
     },
     "SALLY": {
-      "email": "sally@yahoo.com",
+      "email": "sally@yahoo.example",
       "app_password": "sally_app_password"
     }
   },
   "gmail_accounts": {
     "JANE": {
-      "email": "jane@gmail.com",
+      "email": "jane@gmail.example",
       "app_password": "jane_app_password"
     }
   }
@@ -84,7 +84,7 @@ Configuration errors are fatal when:
 
 ### 3. Optional: Configure OpenAI fallback filtering
 
-Use `/Users/markharris/src/EmailCleaner/config.example.json` as a template and copy it to local `config.json`.
+Use `config.example.json` as a template and copy it to local `config.json`.
 `config.json` is gitignored so local settings stay out of source control.
 
 Set API key in environment:
@@ -186,7 +186,7 @@ python3 -m pytest -q
 
 ### Rules file (`rules.json`)
 
-Use `/Users/markharris/src/EmailCleaner/rules.example.json` as a template and copy it to a local `rules.json`.
+Use `rules.example.json` as a template and copy it to a local `rules.json`.
 `rules.json` is gitignored so personal addresses/domains stay local.
 
 Current rules support:
@@ -204,8 +204,8 @@ Example:
 {
   "never_filter": {
     "senders": [
-      "johnsmith.1@gmail.com",
-      "johnhsmith@yahoo.com"
+      "johnsmith.1@example.test",
+      "johnhsmith@example.test"
     ],
     "domains": [
       "bestbank.com",

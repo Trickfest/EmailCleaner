@@ -1,8 +1,8 @@
 {
   "never_filter": {
     "senders": [
-      "johnsmith.1@gmail.com",
-      "johnhsmith@yahoo.com"
+      "johnsmith.1@example.test",
+      "johnhsmith@example.test"
     ],
     "domains": [
       "bestbank.com",

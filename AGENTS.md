@@ -77,6 +77,7 @@ When changing rule behavior:
 
 ## Development Workflow
 Before finalizing changes:
+- Assume dev dependencies are already installed in the active Python environment.
 - Run `python3 -m py_compile email_cleaner.py`
 - Run `python3 -m pytest -q`
 - Check CLI help for new flags: `python3 email_cleaner.py --help`
