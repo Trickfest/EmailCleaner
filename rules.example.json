@@ -26,7 +26,8 @@
     "malformed_from": false,
     "from_regex": [
       "(?i)promo\\s+alerts",
-      "(?i)noreply@deals-now\\.example"
+      "(?i)noreply@deals-now\\.example",
+      "\\u034F"
     ],
     "subject_regex": [
       "(?i)limited\\s+time\\s+offer",
