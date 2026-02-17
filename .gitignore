@@ -15,6 +15,7 @@ env/
 *.local
 rules.json
 accounts.json
+config.json
 
 # Local scanner runtime state
 .yahoo_mail_state.json

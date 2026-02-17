@@ -17,6 +17,18 @@ class DummyIMAP:
     pass
 
 
+OPENAI_CONFIG = app.OpenAIConfig(
+    enabled=True,
+    model="gpt-5-mini",
+    api_base_url="https://api.openai.com/v1",
+    system_prompt="test prompt",
+    confidence_threshold=0.85,
+    timeout_seconds=20.0,
+    max_body_chars=4000,
+    max_subject_chars=300,
+)
+
+
 def patch_common_scan_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -230,3 +242,74 @@ def test_scan_skips_bulk_and_quarantine_folders(monkeypatch: pytest.MonkeyPatch)
     assert scanned_count == 1
     assert len(messages) == 1
     assert messages[0].folder == "INBOX"
+
+
+def test_scan_openai_marks_delete_candidate_when_hard_rules_do_not_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rules = make_scanner_rules()
+    patch_common_scan_dependencies(monkeypatch, summary_factory=make_summary)
+    monkeypatch.setattr(
+        app,
+        "evaluate_openai_delete_candidate",
+        lambda *_args, **_kwargs: app.OpenAIDecision(
+            evaluated=True,
+            decision="delete_candidate",
+            confidence=0.94,
+            reason="model=gpt-5-mini;confidence=0.94;codes=bulk_marketing",
+            delete_candidate=True,
+            reason_codes=("bulk_marketing",),
+        ),
+    )
+
+    messages, _folders_state, _scanned_count = app.scan_new_messages(
+        DummyIMAP(),
+        account=ACCOUNT,
+        folders_state={},
+        max_tracked_uids=5000,
+        scanner_rules=rules,
+        hard_delete=False,
+        dry_run=False,
+        quarantine_folder="Quarantine",
+        quarantine_will_be_created=False,
+        openai_config=OPENAI_CONFIG,
+        openai_api_key="test-api-key",
+    )
+
+    assert len(messages) == 1
+    assert messages[0].llm_evaluated is True
+    assert messages[0].llm_decision == "delete_candidate"
+    assert messages[0].delete_candidate is True
+    assert messages[0].delete_reason.startswith("openai.delete_candidate:")
+    assert messages[0].action == "QUARANTINED"
+
+
+def test_scan_openai_not_called_when_hard_rule_already_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    rules = make_scanner_rules(always_delete_senders={"sender@example.test"})
+    patch_common_scan_dependencies(monkeypatch, summary_factory=make_summary)
+    monkeypatch.setattr(
+        app,
+        "evaluate_openai_delete_candidate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("OpenAI should not be called when deterministic rules match")
+        ),
+    )
+
+    messages, _folders_state, _scanned_count = app.scan_new_messages(
+        DummyIMAP(),
+        account=ACCOUNT,
+        folders_state={},
+        max_tracked_uids=5000,
+        scanner_rules=rules,
+        hard_delete=False,
+        dry_run=False,
+        quarantine_folder="Quarantine",
+        quarantine_will_be_created=False,
+        openai_config=OPENAI_CONFIG,
+        openai_api_key="test-api-key",
+    )
+
+    assert len(messages) == 1
+    assert messages[0].delete_candidate is True
+    assert messages[0].delete_reason == "always_delete.sender:sender@example.test"
+    assert messages[0].llm_evaluated is False

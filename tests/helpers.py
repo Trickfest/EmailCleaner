@@ -73,6 +73,10 @@ def make_summary(
         never_filter_reason="",
         delete_candidate=False,
         delete_reason="",
+        llm_evaluated=False,
+        llm_decision="",
+        llm_confidence=None,
+        llm_reason="",
         action="NONE",
         action_reason="",
     )
