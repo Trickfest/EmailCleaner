@@ -52,6 +52,16 @@ OpenAI post-filter behavior:
 - It requires `openai.enabled=true` and `OPENAI_API_KEY` to be set.
 - Do not let OpenAI override `never_filter`.
 
+## LLM Integration Guardrails
+- Treat `openai.system_prompt` as configuration. When behavior assumptions change, update `config.example.json` and `README.md` in the same change.
+- Keep `confidence` semantics stable: it is the estimated probability that a message is spam, in `[0,1]`.
+- Only mark as delete candidate when OpenAI returns `decision=delete_candidate` and `confidence >= openai.confidence_threshold`.
+- Fail safe on API/network/response-parse errors: keep the message (do not auto-delete/quarantine from error states).
+- Preserve data minimization: send only configured excerpts (`max_subject_chars`, `max_body_chars`) and required metadata.
+- `--dry-run` may call OpenAI, but must never mutate mailbox state or local state files.
+- Keep report output audit-friendly: include compact model decision/context, but do not print full email bodies.
+- Any OpenAI prompt/parsing/threshold behavior change must include test updates in `tests/test_openai_config.py` and relevant routing tests.
+
 When changing rule behavior:
 - Update `README.md` and `rules.example.json` in the same change.
 - Preserve backward-compatible behavior where possible.
@@ -68,6 +78,13 @@ Before finalizing changes:
 - Run `python3 -m pytest -q`
 - Check CLI help for new flags: `python3 yahoo_new_mail_poc.py --help`
 - Prefer safe validation paths (`--dry-run`, temp state files) over live mailbox mutation.
+
+Anti-regression checklist:
+- Deterministic rule precedence is unchanged (`never_filter` before any delete path; OpenAI last).
+- `--dry-run` still performs no mailbox mutations and no state writes.
+- OpenAI failures default to keep, and threshold gating is still enforced.
+- `--hard-delete` behavior remains no-op placeholder for delete candidates.
+- `README.md`, `rules.example.json`, and `config.example.json` remain aligned with runtime behavior.
 
 ## Style
 - Keep implementation in Python stdlib unless explicitly approved.
