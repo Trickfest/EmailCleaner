@@ -251,6 +251,7 @@ Regex notes:
 - Uses Python regex syntax
 - Matching uses `re.search` (pattern can match anywhere in the field)
 - You can embed flags inline (for example `(?i)` for case-insensitive)
+- Domain entries under `never_filter.domains` and `always_delete.domains` match the exact domain and all subdomains (for example `citi.com` matches `info6.citi.com`)
 - `delete_patterns.from_regex` checks both sender display name and sender email address
 - `delete_patterns.auth_triple_fail` only matches when all of SPF, DKIM, and DMARC are explicitly `fail`
 - `delete_patterns.auth_triple_fail` is conservative: if any mechanism has no value or mixed values (for example both `fail` and `pass` in different headers), it does not match

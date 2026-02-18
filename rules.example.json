@@ -44,6 +44,7 @@
     ]
   },
   "_notes": {
-    "llm_post_filter": "Optional OpenAI post-rule filtering is configured in config.json and runs only after these deterministic rules do not match."
+    "llm_post_filter": "Optional OpenAI post-rule filtering is configured in config.json and runs only after these deterministic rules do not match.",
+    "domain_matching": "Entries in never_filter.domains and always_delete.domains match both exact domains and subdomains."
   }
 }

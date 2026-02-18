@@ -42,6 +42,53 @@ def test_never_filter_matches_sender_domain() -> None:
     assert reason == "never_filter.domain:example.test"
 
 
+def test_never_filter_matches_sender_subdomain() -> None:
+    rules = make_scanner_rules(never_filter_domains={"example.test"})
+    summary = make_summary(
+        sender_email="sender@info6.example.test",
+        sender_domain="info6.example.test",
+    )
+
+    matched, reason = evaluate_never_filter(
+        summary.sender_email,
+        summary.sender_domain,
+        rules.never_filter,
+    )
+
+    assert matched is True
+    assert reason == "never_filter.domain:info6.example.test"
+
+
+def test_never_filter_domain_does_not_match_non_subdomain_suffix() -> None:
+    rules = make_scanner_rules(never_filter_domains={"example.test"})
+    summary = make_summary(
+        sender_email="sender@badexample.test",
+        sender_domain="badexample.test",
+    )
+
+    matched, reason = evaluate_never_filter(
+        summary.sender_email,
+        summary.sender_domain,
+        rules.never_filter,
+    )
+
+    assert matched is False
+    assert reason == ""
+
+
+def test_always_delete_matches_sender_subdomain() -> None:
+    rules = make_scanner_rules(always_delete_domains={"example.test"})
+    summary = make_summary(
+        sender_email="sender@info6.example.test",
+        sender_domain="info6.example.test",
+    )
+
+    matched, reason = evaluate_delete_candidate(summary, "", rules)
+
+    assert matched is True
+    assert reason == "always_delete.domain:info6.example.test"
+
+
 def test_always_delete_precedence_wins_over_other_delete_rules() -> None:
     rules = make_scanner_rules(
         always_delete_senders={"sender@example.test"},

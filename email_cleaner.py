@@ -966,8 +966,12 @@ def evaluate_contact_rules(
 ) -> tuple[bool, str]:
     if sender_email and sender_email in senders:
         return True, f"{reason_prefix}.sender:{sender_email}"
-    if sender_domain and sender_domain in domains:
-        return True, f"{reason_prefix}.domain:{sender_domain}"
+    if sender_domain:
+        if sender_domain in domains:
+            return True, f"{reason_prefix}.domain:{sender_domain}"
+        for allowed_domain in domains:
+            if sender_domain.endswith(f".{allowed_domain}"):
+                return True, f"{reason_prefix}.domain:{sender_domain}"
     return False, ""
 
 
