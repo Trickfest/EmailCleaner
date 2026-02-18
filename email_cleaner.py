@@ -2128,7 +2128,11 @@ def main() -> int:
     )
     accounts_state = load_state(state_path)
 
-    print(f"Configured accounts: {len(configured_accounts)}")
+    scan_started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    print()
+    print(
+        f"Beginning scan for {len(configured_accounts)} configured account(s) at {scan_started_at}"
+    )
     if args.provider or args.account_key:
         applied_filters: list[str] = []
         if args.provider:
