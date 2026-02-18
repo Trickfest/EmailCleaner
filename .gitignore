@@ -19,6 +19,7 @@ config.json
 
 # Local scanner runtime state
 .email_cleaner_state.json
+*.log
 
 # macOS
 .DS_Store
