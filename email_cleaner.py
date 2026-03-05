@@ -413,6 +413,83 @@ def set_account_credential(
     raise ValueError(f"Unsupported account credential field: {field_name}")
 
 
+def clone_partial_account(partial: PartialAccountCredentials) -> PartialAccountCredentials:
+    return PartialAccountCredentials(
+        email=partial.email,
+        app_password=partial.app_password,
+        email_source=partial.email_source,
+        app_password_source=partial.app_password_source,
+    )
+
+
+def partial_accounts_match_exactly(
+    env_partial: PartialAccountCredentials,
+    file_partial: PartialAccountCredentials,
+) -> bool:
+    return (
+        env_partial.email is not None
+        and env_partial.app_password is not None
+        and file_partial.email is not None
+        and file_partial.app_password is not None
+        and env_partial.email == file_partial.email
+        and env_partial.app_password == file_partial.app_password
+    )
+
+
+def merge_account_sources(
+    provider: str,
+    account_key: str,
+    env_partial: PartialAccountCredentials | None,
+    file_partial: PartialAccountCredentials | None,
+) -> PartialAccountCredentials:
+    if env_partial is None and file_partial is None:
+        raise ValueError("Expected at least one account source while merging credentials.")
+    if env_partial is None:
+        return clone_partial_account(file_partial)
+    if file_partial is None:
+        return clone_partial_account(env_partial)
+
+    ref_text = account_reference(provider, account_key)
+    if partial_accounts_match_exactly(env_partial, file_partial):
+        print(
+            f"Warning: Duplicate account definition for {ref_text!r} matched exactly in env vars "
+            f"and accounts file. Already set from {env_partial.email_source} and "
+            f"{env_partial.app_password_source}; duplicate from {file_partial.email_source} and "
+            f"{file_partial.app_password_source}. Using env var values.",
+            file=sys.stderr,
+        )
+        return clone_partial_account(env_partial)
+
+    if env_partial.email is not None and file_partial.email is not None:
+        raise ValueError(
+            f"Duplicate email for account {ref_text!r}. "
+            f"Already set from {env_partial.email_source}; duplicate from {file_partial.email_source}."
+        )
+    if env_partial.app_password is not None and file_partial.app_password is not None:
+        raise ValueError(
+            f"Duplicate app_password for account {ref_text!r}. "
+            f"Already set from {env_partial.app_password_source}; duplicate from "
+            f"{file_partial.app_password_source}."
+        )
+
+    merged = PartialAccountCredentials()
+    if env_partial.email is not None:
+        merged.email = env_partial.email
+        merged.email_source = env_partial.email_source
+    else:
+        merged.email = file_partial.email
+        merged.email_source = file_partial.email_source
+
+    if env_partial.app_password is not None:
+        merged.app_password = env_partial.app_password
+        merged.app_password_source = env_partial.app_password_source
+    else:
+        merged.app_password = file_partial.app_password
+        merged.app_password_source = file_partial.app_password_source
+
+    return merged
+
+
 def load_accounts_from_env(
     accounts: dict[tuple[str, str], PartialAccountCredentials],
 ) -> None:
@@ -554,9 +631,19 @@ def load_accounts_from_file(
 
 
 def resolve_accounts(accounts_file_path: Path) -> list[AccountCredentials]:
+    env_accounts: dict[tuple[str, str], PartialAccountCredentials] = {}
+    file_accounts: dict[tuple[str, str], PartialAccountCredentials] = {}
+    load_accounts_from_env(env_accounts)
+    load_accounts_from_file(accounts_file_path, file_accounts)
+
     partial_accounts: dict[tuple[str, str], PartialAccountCredentials] = {}
-    load_accounts_from_env(partial_accounts)
-    load_accounts_from_file(accounts_file_path, partial_accounts)
+    for provider, account_key in sorted(set(env_accounts) | set(file_accounts)):
+        partial_accounts[(provider, account_key)] = merge_account_sources(
+            provider=provider,
+            account_key=account_key,
+            env_partial=env_accounts.get((provider, account_key)),
+            file_partial=file_accounts.get((provider, account_key)),
+        )
 
     if not partial_accounts:
         env_prefix_text = ", ".join(

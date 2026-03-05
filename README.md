@@ -80,7 +80,9 @@ For example, `EMAIL_CLEANER_GMAIL_EMAIL_JANE` in env and
 Configuration errors are fatal when:
 
 - A key has only email or only app password after merging all sources
-- The same key/field is defined more than once (for example env + `accounts.json` both define email for `JOHN`)
+- The same key/field is defined more than once, except when env + `accounts.json` both
+  define the same full account (`email` and `app_password`) for that key. Exact full-account
+  duplicates are allowed with a warning, and env values are used.
 
 ### 3. Optional: Configure OpenAI fallback filtering
 

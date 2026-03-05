@@ -67,6 +67,70 @@ def test_resolve_accounts_reports_missing_field_with_provider(tmp_path, monkeypa
         app.resolve_accounts(tmp_path / "does-not-exist.json")
 
 
+def test_resolve_accounts_warns_when_env_and_file_match_exactly(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    clear_account_env(monkeypatch)
+    monkeypatch.setenv("EMAIL_CLEANER_YAHOO_EMAIL_1", "main@yahoo.com")
+    monkeypatch.setenv("EMAIL_CLEANER_YAHOO_APP_PASSWORD_1", "shared-app-password")
+    accounts_path = tmp_path / "accounts.json"
+    accounts_path.write_text(
+        json.dumps(
+            {
+                "yahoo_accounts": {
+                    "1": {
+                        "email": "main@yahoo.com",
+                        "app_password": "shared-app-password",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    accounts = app.resolve_accounts(accounts_path)
+
+    assert accounts == [
+        app.AccountCredentials(
+            provider="yahoo",
+            account_key="1",
+            email="main@yahoo.com",
+            app_password="shared-app-password",
+        )
+    ]
+    captured = capsys.readouterr()
+    assert "Warning: Duplicate account definition for 'yahoo.1' matched exactly" in captured.err
+    assert "EMAIL_CLEANER_YAHOO_EMAIL_1" in captured.err
+    assert "EMAIL_CLEANER_YAHOO_APP_PASSWORD_1" in captured.err
+
+
+def test_resolve_accounts_still_fails_duplicate_field_when_not_exact_account_match(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_account_env(monkeypatch)
+    monkeypatch.setenv("EMAIL_CLEANER_YAHOO_EMAIL_1", "main@yahoo.com")
+    accounts_path = tmp_path / "accounts.json"
+    accounts_path.write_text(
+        json.dumps(
+            {
+                "yahoo_accounts": {
+                    "1": {
+                        "email": "main@yahoo.com",
+                        "app_password": "shared-app-password",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"Duplicate email for account 'yahoo\.1'"):
+        app.resolve_accounts(accounts_path)
+
+
 def test_resolve_imap_host_defaults_and_override() -> None:
     assert app.resolve_imap_host("yahoo", "") == "imap.mail.yahoo.com"
     assert app.resolve_imap_host("gmail", "") == "imap.gmail.com"
