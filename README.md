@@ -16,6 +16,14 @@ EmailCleaner currently supports Yahoo Mail and Gmail, with more providers planne
 - `--dry-run` simulates actions without moving/deleting messages or updating state
 - Optional account filtering flags (`--provider`, `--account-key`) let you scan a subset of accounts
 
+### macOS background setup
+
+For a beginner-friendly, end-to-end guide to installing EmailCleaner as a macOS LaunchDaemon
+(including Python environment setup, copying runtime config files, start/stop, updates, and uninstall),
+see:
+
+- `INSTALLATION.md`
+
 ### 1. Create app passwords
 
 Both providers typically require app passwords for IMAP access.
@@ -139,10 +147,12 @@ python3 email_cleaner.py \
   --accounts-file accounts.json \
   --config-file config.json \
   --state-file .email_cleaner_state.json \
+  --max-runtime-seconds 3600 \
   --json-output /tmp/new_messages.json
 ```
 
 Default state path is `.email_cleaner_state.json`.
+If `--max-runtime-seconds` is set and runtime exceeds the cap, the scan exits with code `124`.
 By default, EmailCleaner uses provider-specific IMAP hosts:
 
 - Yahoo: `imap.mail.yahoo.com`

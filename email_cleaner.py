@@ -11,6 +11,7 @@ import os
 import re
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -47,6 +48,7 @@ DEFAULT_OPENAI_CONFIDENCE_THRESHOLD = 0.85
 DEFAULT_OPENAI_TIMEOUT_SECONDS = 20.0
 DEFAULT_OPENAI_MAX_BODY_CHARS = 4000
 DEFAULT_OPENAI_MAX_SUBJECT_CHARS = 300
+EXIT_TIMEOUT = 124
 ENV_YAHOO_EMAIL_PREFIX = "EMAIL_CLEANER_YAHOO_EMAIL_"
 ENV_YAHOO_APP_PASSWORD_PREFIX = "EMAIL_CLEANER_YAHOO_APP_PASSWORD_"
 ENV_GMAIL_EMAIL_PREFIX = "EMAIL_CLEANER_GMAIL_EMAIL_"
@@ -210,6 +212,38 @@ class OpenAIDecision:
     reason_codes: tuple[str, ...]
 
 
+class RuntimeLimitExceeded(RuntimeError):
+    """Raised when the configured wall-clock runtime budget has been exceeded."""
+
+
+@dataclass(frozen=True)
+class RuntimeBudget:
+    max_runtime_seconds: int
+    started_monotonic: float
+
+    def enabled(self) -> bool:
+        return self.max_runtime_seconds > 0
+
+    def elapsed_seconds(self) -> float:
+        return time.monotonic() - self.started_monotonic
+
+    def remaining_seconds(self) -> float | None:
+        if not self.enabled():
+            return None
+        return self.max_runtime_seconds - self.elapsed_seconds()
+
+    def ensure_within_limit(self, checkpoint: str) -> None:
+        if not self.enabled():
+            return
+        remaining = self.remaining_seconds()
+        if remaining is None or remaining > 0:
+            return
+        raise RuntimeLimitExceeded(
+            "Runtime limit reached: "
+            f"max={self.max_runtime_seconds}s, "
+            f"elapsed={self.elapsed_seconds():.1f}s, checkpoint={checkpoint}."
+        )
+
 def parse_args() -> argparse.Namespace:
     provider_host_defaults = ", ".join(
         f"{provider}={DEFAULT_IMAP_HOST_BY_PROVIDER[provider]}"
@@ -291,6 +325,16 @@ def parse_args() -> argparse.Namespace:
         "--json-output",
         default="",
         help="Optional path to write fetched message summaries as JSON.",
+    )
+    parser.add_argument(
+        "--max-runtime-seconds",
+        default=0,
+        type=int,
+        help=(
+            "Optional wall-clock runtime cap in seconds. "
+            "If exceeded, scan aborts gracefully with exit code 124. "
+            "Use 0 to disable (default: 0)."
+        ),
     )
     parser.add_argument(
         "--hard-delete",
@@ -1259,6 +1303,7 @@ def evaluate_openai_delete_candidate(
     body_text: str,
     openai_config: OpenAIConfig,
     openai_api_key: str,
+    request_timeout_seconds: float | None = None,
 ) -> OpenAIDecision:
     email_payload = {
         "from": summary.sender,
@@ -1302,8 +1347,12 @@ def evaluate_openai_delete_candidate(
         method="POST",
     )
 
+    timeout_seconds = openai_config.timeout_seconds
+    if request_timeout_seconds is not None:
+        timeout_seconds = max(0.1, min(timeout_seconds, request_timeout_seconds))
+
     try:
-        with urllib.request.urlopen(request, timeout=openai_config.timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             response_body = response.read()
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace").strip()
@@ -1627,6 +1676,7 @@ def cleanup_quarantine_messages(
     quarantine_folder: str,
     cleanup_days: int | None,
     dry_run: bool,
+    runtime_budget: RuntimeBudget | None = None,
 ) -> QuarantineCleanupResult:
     if cleanup_days is None:
         return QuarantineCleanupResult(
@@ -1639,6 +1689,9 @@ def cleanup_quarantine_messages(
             store_failed_count=0,
             detail="",
         )
+
+    if runtime_budget is not None:
+        runtime_budget.ensure_within_limit("cleanup_quarantine_messages.start")
 
     existing_mailbox = find_mailbox_name(imap, quarantine_folder)
     cutoff_date = (datetime.now().date() - timedelta(days=cleanup_days)).strftime("%d-%b-%Y")
@@ -1654,6 +1707,9 @@ def cleanup_quarantine_messages(
             detail=f"mailbox {quarantine_folder!r} not found",
         )
 
+    if runtime_budget is not None:
+        runtime_budget.ensure_within_limit("cleanup_quarantine_messages.select")
+
     if not select_folder(imap, existing_mailbox, readonly=dry_run):
         return QuarantineCleanupResult(
             status="SELECT_FAILED",
@@ -1665,6 +1721,9 @@ def cleanup_quarantine_messages(
             store_failed_count=0,
             detail=f"could not select mailbox {existing_mailbox!r}",
         )
+
+    if runtime_budget is not None:
+        runtime_budget.ensure_within_limit("cleanup_quarantine_messages.search")
 
     search_status, search_data = imap.uid("SEARCH", None, "BEFORE", cutoff_date)
     if search_status != "OK":
@@ -1709,6 +1768,8 @@ def cleanup_quarantine_messages(
     marked_count = 0
     store_failed_count = 0
     for uid in matched_uids:
+        if runtime_budget is not None:
+            runtime_budget.ensure_within_limit("cleanup_quarantine_messages.store")
         store_status, _store_data = imap.uid("STORE", uid, "+FLAGS.SILENT", r"(\Deleted)")
         if store_status == "OK":
             marked_count += 1
@@ -1716,6 +1777,8 @@ def cleanup_quarantine_messages(
             store_failed_count += 1
 
     if marked_count:
+        if runtime_budget is not None:
+            runtime_budget.ensure_within_limit("cleanup_quarantine_messages.expunge")
         expunge_status, expunge_data = imap.expunge()
         if expunge_status != "OK":
             detail = decode_imap_response(expunge_data) or "expunge failed"
@@ -1870,11 +1933,14 @@ def scan_new_messages(
     quarantine_will_be_created: bool,
     openai_config: OpenAIConfig | None = None,
     openai_api_key: str | None = None,
+    runtime_budget: RuntimeBudget | None = None,
 ) -> tuple[list[MessageSummary], dict[str, dict[str, object]], int]:
     messages: list[MessageSummary] = []
     scanned_folder_count = 0
 
     for folder in discover_folders(imap):
+        if runtime_budget is not None:
+            runtime_budget.ensure_within_limit(f"scan_new_messages.folder:{folder.name}")
         if is_excluded_folder(folder, quarantine_folder=quarantine_folder):
             continue
 
@@ -1906,6 +1972,8 @@ def scan_new_messages(
         new_uids = [uid for uid in unseen_uids if uid not in processed_uids]
 
         for uid in new_uids:
+            if runtime_budget is not None:
+                runtime_budget.ensure_within_limit(f"scan_new_messages.uid:{folder.name}:{uid}")
             should_mark_processed = True
             summary = fetch_message_summary(imap, account, folder.name, uid)
             if summary:
@@ -1928,6 +1996,10 @@ def scan_new_messages(
                         scanner_rules,
                     )
                     if not is_delete_candidate and scanner_rules.delete_patterns.body_regex:
+                        if runtime_budget is not None:
+                            runtime_budget.ensure_within_limit(
+                                f"scan_new_messages.body_fetch:{folder.name}:{uid}"
+                            )
                         body_text = fetch_message_body_text(imap, uid)
                         body_text_loaded = True
                         is_delete_candidate, delete_reason = evaluate_delete_candidate(
@@ -1941,13 +2013,28 @@ def scan_new_messages(
                         and openai_config.enabled
                         and openai_api_key
                     ):
+                        if runtime_budget is not None:
+                            runtime_budget.ensure_within_limit(
+                                f"scan_new_messages.openai_precheck:{folder.name}:{uid}"
+                            )
                         if not body_text_loaded:
+                            if runtime_budget is not None:
+                                runtime_budget.ensure_within_limit(
+                                    f"scan_new_messages.body_fetch_openai:{folder.name}:{uid}"
+                                )
                             body_text = fetch_message_body_text(imap, uid)
+                        openai_timeout_override: float | None = None
+                        if runtime_budget is not None:
+                            remaining = runtime_budget.remaining_seconds()
+                            if remaining is not None:
+                                # Keep OpenAI requests bounded by remaining wall-clock budget.
+                                openai_timeout_override = max(0.1, remaining)
                         openai_decision = evaluate_openai_delete_candidate(
                             summary,
                             body_text,
                             openai_config,
                             openai_api_key,
+                            request_timeout_seconds=openai_timeout_override,
                         )
                         summary.llm_evaluated = openai_decision.evaluated
                         summary.llm_decision = openai_decision.decision
@@ -1977,6 +2064,10 @@ def scan_new_messages(
                                 else:
                                     summary.action_reason = f"would move to {quarantine_folder}"
                             else:
+                                if runtime_budget is not None:
+                                    runtime_budget.ensure_within_limit(
+                                        f"scan_new_messages.move_quarantine:{folder.name}:{uid}"
+                                    )
                                 moved, move_reason = move_uid_to_mailbox(imap, uid, quarantine_folder)
                                 if moved:
                                     summary.action = "QUARANTINED"
@@ -2170,6 +2261,7 @@ def main() -> int:
             "--config-file",
             "--max-tracked-uids",
             "--json-output",
+            "--max-runtime-seconds",
             "--hard-delete",
             "--dry-run",
         ]
@@ -2197,6 +2289,13 @@ def main() -> int:
     rules_path = Path(args.rules_file)
     accounts_path = Path(args.accounts_file)
     config_path = Path(args.config_file)
+    if args.max_runtime_seconds < 0:
+        print("--max-runtime-seconds must be >= 0.", file=sys.stderr)
+        return 2
+    runtime_budget = RuntimeBudget(
+        max_runtime_seconds=args.max_runtime_seconds,
+        started_monotonic=time.monotonic(),
+    )
 
     try:
         app_config = load_app_config(config_path)
@@ -2224,6 +2323,8 @@ def main() -> int:
     print(
         f"Beginning scan for {len(configured_accounts)} configured account(s) at {scan_started_at}"
     )
+    if runtime_budget.enabled():
+        print(f"Runtime cap: {runtime_budget.max_runtime_seconds} second(s).")
     if args.provider or args.account_key:
         applied_filters: list[str] = []
         if args.provider:
@@ -2234,6 +2335,7 @@ def main() -> int:
 
     all_messages: list[MessageSummary] = []
     account_errors: list[str] = []
+    timeout_reason = ""
     context = ssl.create_default_context()
 
     for index, account in enumerate(configured_accounts):
@@ -2247,8 +2349,10 @@ def main() -> int:
         account_label = f"{account.provider}:{account.account_key}"
 
         try:
+            runtime_budget.ensure_within_limit(f"main.account_start:{account_label}")
             imap_host = resolve_imap_host(account.provider, host_override)
             with imaplib.IMAP4_SSL(imap_host, args.port, ssl_context=context) as imap:
+                runtime_budget.ensure_within_limit(f"main.account_login:{account_label}")
                 imap.login(account.email, account.app_password)
 
                 quarantine_folder = DEFAULT_QUARANTINE_FOLDER
@@ -2285,12 +2389,14 @@ def main() -> int:
                     quarantine_will_be_created=quarantine_will_be_created,
                     openai_config=app_config.openai,
                     openai_api_key=openai_api_key,
+                    runtime_budget=runtime_budget,
                 )
                 cleanup_result = cleanup_quarantine_messages(
                     imap,
                     quarantine_folder=quarantine_folder,
                     cleanup_days=scanner_rules.quarantine_cleanup_days,
                     dry_run=args.dry_run,
+                    runtime_budget=runtime_budget,
                 )
                 accounts_state[state_key] = updated_state
                 all_messages.extend(messages)
@@ -2306,6 +2412,13 @@ def main() -> int:
                     cleanup_result=cleanup_result,
                     openai_config=app_config.openai,
                 )
+        except RuntimeLimitExceeded as error:
+            timeout_reason = str(error)
+            print(
+                f"Stopping scan due to runtime limit for account {account_label}: {error}",
+                file=sys.stderr,
+            )
+            break
         except imaplib.IMAP4.error as error:
             print(
                 f"IMAP error for account {account_label} ({account.email}): {error}",
@@ -2349,6 +2462,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if timeout_reason:
+        return EXIT_TIMEOUT
 
     return 0
 
