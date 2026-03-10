@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+import email_cleaner_watchdog as watchdog
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,3 +48,23 @@ def test_watchdog_times_out_and_returns_timeout_exit_code() -> None:
     )
     assert result.returncode == 124
     assert "[watchdog] hard timeout reached" in result.stderr
+    assert re.search(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", result.stderr)
+
+
+def test_wait_for_process_exit_uses_wall_clock_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProcess:
+        args = ["python"]
+
+        def poll(self):
+            return None
+
+    wall_clock_times = iter([100.0, 100.0, 106.0])
+    sleep_calls: list[float] = []
+
+    monkeypatch.setattr(watchdog.time, "time", lambda: next(wall_clock_times))
+    monkeypatch.setattr(watchdog.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        watchdog.wait_for_process_exit(FakeProcess(), timeout_seconds=5.0, poll_interval_seconds=0.2)
+
+    assert sleep_calls == [0.2]

@@ -6,10 +6,17 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
+from datetime import datetime
 from typing import Sequence
 
 
 EXIT_TIMEOUT = 124
+
+
+def print_stderr(message: str) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"{timestamp} {message}", file=sys.stderr, flush=True)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -50,24 +57,40 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def wait_for_process_exit(
+    process: subprocess.Popen,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 0.2,
+) -> int:
+    deadline = time.time() + timeout_seconds
+    while True:
+        return_code = process.poll()
+        if return_code is not None:
+            return return_code
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+        time.sleep(min(poll_interval_seconds, max(0.01, remaining)))
+
+
 def run_with_watchdog(command: Sequence[str], timeout_seconds: float, term_grace_seconds: float) -> int:
     process = subprocess.Popen(command)
     try:
-        return process.wait(timeout=timeout_seconds)
+        return wait_for_process_exit(process, timeout_seconds)
     except subprocess.TimeoutExpired:
-        print(
-            f"[watchdog] hard timeout reached after {timeout_seconds:.1f}s; sending SIGTERM.",
-            file=sys.stderr,
+        print_stderr(
+            f"[watchdog] hard timeout reached after {timeout_seconds:.1f}s; sending SIGTERM."
         )
-        process.terminate()
+        if process.poll() is None:
+            process.terminate()
         try:
-            process.wait(timeout=term_grace_seconds)
+            wait_for_process_exit(process, term_grace_seconds)
         except subprocess.TimeoutExpired:
-            print(
-                f"[watchdog] process did not exit after {term_grace_seconds:.1f}s grace; sending SIGKILL.",
-                file=sys.stderr,
+            print_stderr(
+                f"[watchdog] process did not exit after {term_grace_seconds:.1f}s grace; sending SIGKILL."
             )
-            process.kill()
+            if process.poll() is None:
+                process.kill()
             process.wait()
         return EXIT_TIMEOUT
 

@@ -13,15 +13,15 @@ class DummyIMAP:
 
 
 def test_runtime_budget_disabled_allows_unbounded_run() -> None:
-    budget = app.RuntimeBudget(max_runtime_seconds=0, started_monotonic=0.0)
+    budget = app.RuntimeBudget(max_runtime_seconds=0, started_epoch_seconds=0.0)
     assert budget.enabled() is False
     assert budget.remaining_seconds() is None
     budget.ensure_within_limit("test")
 
 
 def test_runtime_budget_raises_when_elapsed_exceeds_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(app.time, "monotonic", lambda: 12.0)
-    budget = app.RuntimeBudget(max_runtime_seconds=5, started_monotonic=0.0)
+    monkeypatch.setattr(app.time, "time", lambda: 12.0)
+    budget = app.RuntimeBudget(max_runtime_seconds=5, started_epoch_seconds=0.0)
     with pytest.raises(app.RuntimeLimitExceeded):
         budget.ensure_within_limit("test_checkpoint")
 
@@ -36,9 +36,9 @@ def test_scan_new_messages_raises_when_runtime_exceeded(monkeypatch: pytest.Monk
     monkeypatch.setattr(app, "get_uidvalidity", lambda _imap: "1")
     monkeypatch.setattr(app, "search_unseen_uids", lambda _imap: ["100"])
     monkeypatch.setattr(app, "fetch_message_summary", lambda *_args, **_kwargs: make_summary())
-    monkeypatch.setattr(app.time, "monotonic", lambda: 2.0)
+    monkeypatch.setattr(app.time, "time", lambda: 2.0)
 
-    runtime_budget = app.RuntimeBudget(max_runtime_seconds=1, started_monotonic=0.0)
+    runtime_budget = app.RuntimeBudget(max_runtime_seconds=1, started_epoch_seconds=0.0)
     with pytest.raises(app.RuntimeLimitExceeded):
         app.scan_new_messages(
             DummyIMAP(),
@@ -99,7 +99,13 @@ def test_main_returns_timeout_exit_code_and_writes_state(
         def login(self, _email: str, _password: str):
             return "OK", [b""]
 
-    monkeypatch.setattr(app.imaplib, "IMAP4_SSL", lambda *_args, **_kwargs: FakeIMAPConnection())
+    imap_calls: list[dict[str, object]] = []
+
+    def fake_imap4_ssl(*_args, **kwargs):
+        imap_calls.append(kwargs)
+        return FakeIMAPConnection()
+
+    monkeypatch.setattr(app.imaplib, "IMAP4_SSL", fake_imap4_ssl)
     monkeypatch.setattr(app, "ensure_mailbox_exists", lambda _imap, _folder: "Quarantine")
     monkeypatch.setattr(
         app,
@@ -122,6 +128,8 @@ def test_main_returns_timeout_exit_code_and_writes_state(
 
     exit_code = app.main()
     assert exit_code == app.EXIT_TIMEOUT
+    assert len(imap_calls) == 1
+    assert 0 < imap_calls[0]["timeout"] <= app.DEFAULT_IMAP_TIMEOUT_SECONDS
     assert len(save_calls) == 1
     saved_path, _saved_state, saved_accounts = save_calls[0]
     assert saved_path == state_path

@@ -41,6 +41,7 @@ DEFAULT_ACCOUNTS_FILE = "accounts.json"
 DEFAULT_CONFIG_FILE = "config.json"
 DEFAULT_MAX_TRACKED_UIDS = 5000
 DEFAULT_QUARANTINE_FOLDER = "Quarantine"
+DEFAULT_IMAP_TIMEOUT_SECONDS = 60.0
 ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
 DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_OPENAI_API_BASE_URL = "https://api.openai.com/v1"
@@ -185,6 +186,11 @@ class QuarantineCleanupResult:
 
 
 @dataclass(frozen=True)
+class IMAPConfig:
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
 class OpenAIConfig:
     enabled: bool
     model: str
@@ -198,6 +204,7 @@ class OpenAIConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
+    imap: IMAPConfig
     openai: OpenAIConfig
     max_tracked_uids: int
 
@@ -216,16 +223,21 @@ class RuntimeLimitExceeded(RuntimeError):
     """Raised when the configured wall-clock runtime budget has been exceeded."""
 
 
+def print_stderr(message: str) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"{timestamp} {message}", file=sys.stderr, flush=True)
+
+
 @dataclass(frozen=True)
 class RuntimeBudget:
     max_runtime_seconds: int
-    started_monotonic: float
+    started_epoch_seconds: float
 
     def enabled(self) -> bool:
         return self.max_runtime_seconds > 0
 
     def elapsed_seconds(self) -> float:
-        return time.monotonic() - self.started_monotonic
+        return time.time() - self.started_epoch_seconds
 
     def remaining_seconds(self) -> float | None:
         if not self.enabled():
@@ -495,12 +507,11 @@ def merge_account_sources(
 
     ref_text = account_reference(provider, account_key)
     if partial_accounts_match_exactly(env_partial, file_partial):
-        print(
+        print_stderr(
             f"Warning: Duplicate account definition for {ref_text!r} matched exactly in env vars "
             f"and accounts file. Already set from {env_partial.email_source} and "
             f"{env_partial.app_password_source}; duplicate from {file_partial.email_source} and "
-            f"{file_partial.app_password_source}. Using env var values.",
-            file=sys.stderr,
+            f"{file_partial.app_password_source}. Using env var values."
         )
         return clone_partial_account(env_partial)
 
@@ -794,6 +805,9 @@ def normalize_string_set(values: object) -> set[str]:
 
 def default_app_config() -> AppConfig:
     return AppConfig(
+        imap=IMAPConfig(
+            timeout_seconds=DEFAULT_IMAP_TIMEOUT_SECONDS,
+        ),
         openai=OpenAIConfig(
             enabled=False,
             model=DEFAULT_OPENAI_MODEL,
@@ -873,11 +887,26 @@ def load_app_config(path: Path) -> AppConfig:
     if not isinstance(raw, dict):
         raise ValueError(f"Config file {path} must contain a JSON object.")
 
+    imap_config_raw = raw.get("imap", {})
+    if imap_config_raw is None:
+        imap_config_raw = {}
+    if not isinstance(imap_config_raw, dict):
+        raise ValueError(f"Config file {path} has invalid imap section.")
+
     openai_config_raw = raw.get("openai", {})
     if openai_config_raw is None:
         openai_config_raw = {}
     if not isinstance(openai_config_raw, dict):
         raise ValueError(f"Config file {path} has invalid openai section.")
+
+    imap_defaults = defaults.imap
+    imap_config = IMAPConfig(
+        timeout_seconds=parse_positive_number_config(
+            imap_config_raw.get("timeout_seconds"),
+            "imap.timeout_seconds",
+            imap_defaults.timeout_seconds,
+        ),
+    )
 
     openai_defaults = defaults.openai
     openai_config = OpenAIConfig(
@@ -923,6 +952,7 @@ def load_app_config(path: Path) -> AppConfig:
         ),
     )
     return AppConfig(
+        imap=imap_config,
         openai=openai_config,
         max_tracked_uids=parse_positive_int_config(
             raw.get("max_tracked_uids"),
@@ -2268,10 +2298,9 @@ def main() -> int:
         conflicting_options = [opt for opt in disallowed_with_reset if cli_option_was_set(opt, argv)]
         if conflicting_options:
             options_text = ", ".join(conflicting_options)
-            print(
+            print_stderr(
                 "Invalid arguments: --reset-app cannot be combined with "
-                f"{options_text}. Use only --reset-app and optional --state-file.",
-                file=sys.stderr,
+                f"{options_text}. Use only --reset-app and optional --state-file."
             )
             return 2
 
@@ -2282,7 +2311,7 @@ def main() -> int:
             else:
                 print(f"Reset complete. State file does not exist: {state_path}")
         except OSError as error:
-            print(f"Could not reset app state at {state_path}: {error}", file=sys.stderr)
+            print_stderr(f"Could not reset app state at {state_path}: {error}")
             return 1
         return 0
 
@@ -2290,11 +2319,11 @@ def main() -> int:
     accounts_path = Path(args.accounts_file)
     config_path = Path(args.config_file)
     if args.max_runtime_seconds < 0:
-        print("--max-runtime-seconds must be >= 0.", file=sys.stderr)
+        print_stderr("--max-runtime-seconds must be >= 0.")
         return 2
     runtime_budget = RuntimeBudget(
         max_runtime_seconds=args.max_runtime_seconds,
-        started_monotonic=time.monotonic(),
+        started_epoch_seconds=time.time(),
     )
 
     try:
@@ -2308,7 +2337,7 @@ def main() -> int:
             account_key_filter=args.account_key,
         )
     except ValueError as error:
-        print(error, file=sys.stderr)
+        print_stderr(str(error))
         return 2
 
     effective_max_tracked_uids = resolve_effective_max_tracked_uids(
@@ -2325,6 +2354,7 @@ def main() -> int:
     )
     if runtime_budget.enabled():
         print(f"Runtime cap: {runtime_budget.max_runtime_seconds} second(s).")
+    print(f"IMAP socket timeout: {app_config.imap.timeout_seconds:g} second(s).")
     if args.provider or args.account_key:
         applied_filters: list[str] = []
         if args.provider:
@@ -2351,7 +2381,19 @@ def main() -> int:
         try:
             runtime_budget.ensure_within_limit(f"main.account_start:{account_label}")
             imap_host = resolve_imap_host(account.provider, host_override)
-            with imaplib.IMAP4_SSL(imap_host, args.port, ssl_context=context) as imap:
+            imap_timeout_seconds = app_config.imap.timeout_seconds
+            remaining_runtime_seconds = runtime_budget.remaining_seconds()
+            if remaining_runtime_seconds is not None:
+                imap_timeout_seconds = max(
+                    0.1,
+                    min(imap_timeout_seconds, remaining_runtime_seconds),
+                )
+            with imaplib.IMAP4_SSL(
+                imap_host,
+                args.port,
+                ssl_context=context,
+                timeout=imap_timeout_seconds,
+            ) as imap:
                 runtime_budget.ensure_within_limit(f"main.account_login:{account_label}")
                 imap.login(account.email, account.app_password)
 
@@ -2368,10 +2410,7 @@ def main() -> int:
                         try:
                             quarantine_folder = ensure_mailbox_exists(imap, DEFAULT_QUARANTINE_FOLDER)
                         except ValueError as error:
-                            print(
-                                f"[{account_label}] {error}",
-                                file=sys.stderr,
-                            )
+                            print_stderr(f"[{account_label}] {error}")
                             account_errors.append(
                                 f"{account_label} ({account.email}): {error}"
                             )
@@ -2414,24 +2453,17 @@ def main() -> int:
                 )
         except RuntimeLimitExceeded as error:
             timeout_reason = str(error)
-            print(
-                f"Stopping scan due to runtime limit for account {account_label}: {error}",
-                file=sys.stderr,
-            )
+            print_stderr(f"Stopping scan due to runtime limit for account {account_label}: {error}")
             break
         except imaplib.IMAP4.error as error:
-            print(
-                f"IMAP error for account {account_label} ({account.email}): {error}",
-                file=sys.stderr,
-            )
+            print_stderr(f"IMAP error for account {account_label} ({account.email}): {error}")
             account_errors.append(f"{account_label} ({account.email}): IMAP error: {error}")
         except OSError as error:
-            print(
-                f"Network or file error for account {account_label} ({account.email}): {error}",
-                file=sys.stderr,
+            print_stderr(
+                f"Network or timeout error for account {account_label} ({account.email}): {error}"
             )
             account_errors.append(
-                f"{account_label} ({account.email}): network or file error: {error}"
+                f"{account_label} ({account.email}): network or timeout error: {error}"
             )
 
     if args.dry_run:
@@ -2440,7 +2472,7 @@ def main() -> int:
         try:
             save_state(state_path, accounts_state, configured_accounts)
         except OSError as error:
-            print(f"Could not write state file {state_path}: {error}", file=sys.stderr)
+            print_stderr(f"Could not write state file {state_path}: {error}")
             return 1
 
     if args.json_output:
@@ -2452,15 +2484,11 @@ def main() -> int:
             )
             print(f"Wrote JSON output to {output_path}")
         except OSError as error:
-            print(f"Could not write JSON output at {output_path}: {error}", file=sys.stderr)
+            print_stderr(f"Could not write JSON output at {output_path}: {error}")
             return 1
 
     if account_errors:
-        print(
-            "One or more accounts failed: "
-            + "; ".join(account_errors),
-            file=sys.stderr,
-        )
+        print_stderr("One or more accounts failed: " + "; ".join(account_errors))
         return 1
 
     if timeout_reason:

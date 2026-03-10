@@ -287,11 +287,11 @@ if [[ -z "\${OPENAI_API_KEY:-}" ]]; then
   exit 1
 fi
 
-exec "${EC_VENV_PYTHON}" "${EC_WATCHDOG_SCRIPT}" \
+exec "${EC_VENV_PYTHON}" -u "${EC_WATCHDOG_SCRIPT}" \
   --timeout-seconds "${EC_WATCHDOG_TIMEOUT_SECONDS}" \
   --term-grace-seconds "${EC_WATCHDOG_GRACE_SECONDS}" \
   -- \
-  "${EC_VENV_PYTHON}" "${EC_INSTALL_DIR}/email_cleaner.py" \
+  "${EC_VENV_PYTHON}" -u "${EC_INSTALL_DIR}/email_cleaner.py" \
   --max-runtime-seconds "${EC_MAX_RUNTIME_SECONDS}" \
   --rules-file "${EC_SUPPORT_DIR}/rules.json" \
   --accounts-file "${EC_SUPPORT_DIR}/accounts.json" \

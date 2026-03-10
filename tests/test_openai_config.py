@@ -23,6 +23,7 @@ def make_openai_config(*, threshold: float = 0.85) -> app.OpenAIConfig:
 
 def make_app_config(*, max_tracked_uids: int = 5000) -> app.AppConfig:
     return app.AppConfig(
+        imap=app.IMAPConfig(timeout_seconds=60.0),
         openai=make_openai_config(),
         max_tracked_uids=max_tracked_uids,
     )
@@ -49,15 +50,19 @@ def test_load_app_config_defaults_when_file_missing(tmp_path) -> None:
     assert config.openai.model == "gpt-5-mini"
     assert config.openai.confidence_threshold == 0.85
     assert config.openai.system_prompt
+    assert config.imap.timeout_seconds == 60.0
     assert config.max_tracked_uids == 5000
 
 
-def test_load_app_config_reads_openai_section(tmp_path) -> None:
+def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             {
                 "max_tracked_uids": 1200,
+                "imap": {
+                    "timeout_seconds": 45,
+                },
                 "openai": {
                     "enabled": True,
                     "model": "gpt-5-mini",
@@ -75,6 +80,7 @@ def test_load_app_config_reads_openai_section(tmp_path) -> None:
 
     config = app.load_app_config(config_path)
 
+    assert config.imap.timeout_seconds == 45
     assert config.openai.enabled is True
     assert config.openai.system_prompt == "custom spam classifier prompt"
     assert config.openai.confidence_threshold == 0.92
@@ -87,6 +93,8 @@ def test_load_app_config_reads_openai_section(tmp_path) -> None:
 @pytest.mark.parametrize(
     "payload,match",
     [
+        ({"imap": {"timeout_seconds": 0}}, "imap.timeout_seconds"),
+        ({"imap": []}, "invalid imap section"),
         ({"openai": {"confidence_threshold": 1.1}}, "openai.confidence_threshold"),
         ({"openai": {"timeout_seconds": 0}}, "openai.timeout_seconds"),
         ({"openai": {"max_body_chars": 0}}, "openai.max_body_chars"),
