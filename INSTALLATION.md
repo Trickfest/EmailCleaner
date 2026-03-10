@@ -532,3 +532,79 @@ test ! -e "$EC_LOG_DIR" && echo "logs removed"
 
 - LaunchDaemon runs at login window and after logout.
 - If FileVault is locked after certain reboot paths, one unlock may still be required before jobs resume.
+
+## Optional: Rotate Daemon Log Files With `newsyslog`
+
+If you installed EmailCleaner as a LaunchDaemon, macOS writes stdout/stderr to:
+
+- `/Library/Logs/EmailCleaner/email-cleaner.out.log`
+- `/Library/Logs/EmailCleaner/email-cleaner.err.log`
+
+By default, those files are not rotated by EmailCleaner itself. Adding an optional
+`newsyslog` rule keeps them from growing without bound by rotating them daily and
+keeping about one month of history.
+
+This is optional. Use it if you want to cap log growth on a long-running install.
+
+### Install Log Rotation Rule
+
+If your LaunchDaemon runs as your current shell user, use:
+
+```bash
+RUN_USER="$(id -un)"
+RUN_GROUP="$(id -gn "$RUN_USER")"
+
+sudo tee /etc/newsyslog.d/emailcleaner.conf >/dev/null <<EOF
+/Library/Logs/EmailCleaner/email-cleaner.out.log  ${RUN_USER}:${RUN_GROUP}  600  30  *  \$D0  N
+/Library/Logs/EmailCleaner/email-cleaner.err.log  ${RUN_USER}:${RUN_GROUP}  600  30  *  \$D0  N
+EOF
+```
+
+If you installed the daemon with a different `--user`, replace `RUN_USER` and
+`RUN_GROUP` with that account instead of using `id -un`.
+
+Rule behavior:
+
+- Rotate once per day at midnight.
+- Keep 30 archived logs for each file.
+- Do not rotate based on size.
+- Do not compress archives.
+- Do not signal any daemon after rotation (`N` flag).
+
+### Verify Log Rotation Rule
+
+Dry-run validation:
+
+```bash
+sudo newsyslog -nv /Library/Logs/EmailCleaner/email-cleaner.out.log /Library/Logs/EmailCleaner/email-cleaner.err.log
+```
+
+Optional forced rotation test:
+
+```bash
+sudo newsyslog -F /Library/Logs/EmailCleaner/email-cleaner.out.log /Library/Logs/EmailCleaner/email-cleaner.err.log
+ls -l /Library/Logs/EmailCleaner
+```
+
+Expected result:
+
+- You should see the current `.log` files plus rotated files such as `.log.0`.
+- Rotation applies automatically after the config file is present; no separate
+  service needs to be installed for `newsyslog`.
+
+### Remove Log Rotation Rule
+
+To stop future log rotation for EmailCleaner:
+
+```bash
+sudo rm -f /etc/newsyslog.d/emailcleaner.conf
+test ! -e /etc/newsyslog.d/emailcleaner.conf && echo "EmailCleaner newsyslog rule removed"
+```
+
+This only removes the rotation rule. It does not delete any existing log files.
+
+If you also want to remove existing rotated EmailCleaner log archives:
+
+```bash
+sudo rm -f /Library/Logs/EmailCleaner/email-cleaner.out.log.[0-9]* /Library/Logs/EmailCleaner/email-cleaner.err.log.[0-9]*
+```
