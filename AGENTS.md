@@ -32,6 +32,7 @@ EmailCleaner is a Python IMAP scanner that currently supports Yahoo Mail and Gma
 Keep these semantics unless explicitly asked to change them:
 - Default delete action is move-to-`Quarantine` (create folder if missing).
 - Default IMAP host is provider-specific (`yahoo` -> `imap.mail.yahoo.com`, `gmail` -> `imap.gmail.com`) unless `--host` override is set.
+- `imap.timeout_seconds` bounds individual IMAP socket operations and defaults to 60 seconds.
 - Optional `quarantine_cleanup_days` deletes old messages from `Quarantine`; if unset/null, cleanup is disabled.
 - `--hard-delete` is currently a no-op placeholder for delete candidates.
 - `--dry-run` performs no mailbox mutations and does not write state.
@@ -82,6 +83,8 @@ Before finalizing changes:
 - Run `python3 -m pytest -q`
 - Check CLI help for new flags: `python3 email_cleaner.py --help`
 - Prefer safe validation paths (`--dry-run`, temp state files) over live mailbox mutation.
+- When changing daemon/runtime behavior, keep `INSTALLATION.md` and generated launcher behavior aligned with the installed runtime.
+- Production `rules.json`, `config.json`, and `accounts.json` may be mirrored into the repo for local reference, but must remain untracked and uncommitted.
 
 Anti-regression checklist:
 - Deterministic rule precedence is unchanged (`never_filter` before any delete path; OpenAI last).
