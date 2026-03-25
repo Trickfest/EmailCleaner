@@ -31,9 +31,10 @@ does not depend on a custom log subdirectory existing after boot or update.
 
 1. macOS machine with admin access (`sudo`).
 2. Repo cloned locally.
-3. Python 3 available at `/usr/bin/python3`.
-4. `OPENAI_API_KEY` is exported in your current shell before you run install commands.
-5. You have runtime files in repo root:
+3. Xcode or Apple Command Line Tools installed so `/usr/bin/python3` is available.
+4. `/usr/bin/python3 -m venv` works on the target Mac.
+5. `OPENAI_API_KEY` is exported in your current shell before you run install commands.
+6. You have runtime files in repo root:
 - `rules.json`
 - `config.json`
 - `accounts.json` (or env vars to generate it)
@@ -62,6 +63,10 @@ cd /path/to/repo
 export OPENAI_API_KEY="your_openai_api_key_here"
 ./scripts/install_launchdaemon.sh --interval 30
 ```
+
+The installer always creates the daemon virtual environment from
+`/usr/bin/python3`. In practice, that means the deployed runtime follows the
+Apple developer-tools Python configured on that Mac.
 
 Default runtime guardrails:
 
