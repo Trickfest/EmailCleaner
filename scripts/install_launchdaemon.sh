@@ -114,7 +114,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME="EmailCleaner"
 INSTALL_DIR="/usr/local/libexec/${APP_NAME}"
 APP_SUPPORT_DIR="/Library/Application Support/${APP_NAME}"
-LOG_DIR="/Library/Logs/${APP_NAME}"
+LOG_OUT_PATH="/Library/Logs/email-cleaner.out.log"
+LOG_ERR_PATH="/Library/Logs/email-cleaner.err.log"
 PLIST_PATH="/Library/LaunchDaemons/${LABEL}.plist"
 VENV_PYTHON="${INSTALL_DIR}/.venv/bin/python"
 WATCHDOG_SCRIPT="${INSTALL_DIR}/email_cleaner_watchdog.py"
@@ -249,7 +250,8 @@ sudo -v
 info "Creating install directories."
 sudo install -d -o root -g wheel -m 755 "$INSTALL_DIR"
 sudo install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 700 "$APP_SUPPORT_DIR"
-sudo install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 755 "$LOG_DIR"
+sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 644 /dev/null "$LOG_OUT_PATH"
+sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 644 /dev/null "$LOG_ERR_PATH"
 
 info "Deploying code to ${INSTALL_DIR}."
 sudo rsync -a --delete \
@@ -305,6 +307,7 @@ if [[ "$INTERVAL_MINUTES" == "15" ]]; then
   <string>${INSTALL_DIR}</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/bash</string>
     <string>${LAUNCHER_SCRIPT}</string>
   </array>
   <key>RunAtLoad</key>
@@ -317,9 +320,9 @@ if [[ "$INTERVAL_MINUTES" == "15" ]]; then
     <dict><key>Minute</key><integer>45</integer></dict>
   </array>
   <key>StandardOutPath</key>
-  <string>${LOG_DIR}/email-cleaner.out.log</string>
+  <string>${LOG_OUT_PATH}</string>
   <key>StandardErrorPath</key>
-  <string>${LOG_DIR}/email-cleaner.err.log</string>
+  <string>${LOG_ERR_PATH}</string>
   <key>ProcessType</key>
   <string>Background</string>
 </dict>
@@ -339,6 +342,7 @@ else
   <string>${INSTALL_DIR}</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/bash</string>
     <string>${LAUNCHER_SCRIPT}</string>
   </array>
   <key>RunAtLoad</key>
@@ -349,9 +353,9 @@ else
     <dict><key>Minute</key><integer>30</integer></dict>
   </array>
   <key>StandardOutPath</key>
-  <string>${LOG_DIR}/email-cleaner.out.log</string>
+  <string>${LOG_OUT_PATH}</string>
   <key>StandardErrorPath</key>
-  <string>${LOG_DIR}/email-cleaner.err.log</string>
+  <string>${LOG_ERR_PATH}</string>
   <key>ProcessType</key>
   <string>Background</string>
 </dict>
@@ -382,16 +386,16 @@ echo "Code: ${INSTALL_DIR}"
 echo "Config: ${APP_SUPPORT_DIR}"
 echo "OpenAI env file: ${OPENAI_ENV_PATH}"
 echo "Launcher: ${LAUNCHER_SCRIPT}"
-echo "Logs: ${LOG_DIR}/email-cleaner.out.log and ${LOG_DIR}/email-cleaner.err.log"
+echo "Logs: ${LOG_OUT_PATH} and ${LOG_ERR_PATH}"
 echo "Status check: sudo launchctl print system/${LABEL}"
 echo
 echo "Smoke test commands:"
 echo "  1) Verify launchd job state:"
 echo "     sudo launchctl print system/${LABEL}"
 echo "  2) Check stdout log:"
-echo "     tail -n 100 \"${LOG_DIR}/email-cleaner.out.log\""
+echo "     tail -n 100 \"${LOG_OUT_PATH}\""
 echo "  3) Check stderr log:"
-echo "     tail -n 100 \"${LOG_DIR}/email-cleaner.err.log\""
+echo "     tail -n 100 \"${LOG_ERR_PATH}\""
 echo "  4) Trigger an immediate run:"
 echo "     sudo launchctl kickstart -k system/${LABEL}"
 echo "  5) Confirm OpenAI env file exists:"

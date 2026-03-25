@@ -14,8 +14,11 @@ Use this if you want EmailCleaner to run automatically as a system background ta
 - Code installed to `/usr/local/libexec/EmailCleaner`
 - Runtime config and state in `/Library/Application Support/EmailCleaner`
 - OpenAI env file in `/Library/Application Support/EmailCleaner/openai.env` (mode `600`)
-- Logs in `/Library/Logs/EmailCleaner`
+- Logs in `/Library/Logs/email-cleaner.out.log` and `/Library/Logs/email-cleaner.err.log`
 - LaunchDaemon plist in `/Library/LaunchDaemons/com.emailcleaner.daemon.plist`
+
+The LaunchDaemon writes directly to fixed log files under `/Library/Logs` so it
+does not depend on a custom log subdirectory existing after boot or update.
 
 ## How LaunchDaemon Behaves
 
@@ -121,7 +124,8 @@ export RUN_GROUP="$(id -gn "$RUN_USER")"
 
 export EC_INSTALL_DIR="/usr/local/libexec/${EC_APP_NAME}"
 export EC_SUPPORT_DIR="/Library/Application Support/${EC_APP_NAME}"
-export EC_LOG_DIR="/Library/Logs/${EC_APP_NAME}"
+export EC_LOG_OUT_PATH="/Library/Logs/email-cleaner.out.log"
+export EC_LOG_ERR_PATH="/Library/Logs/email-cleaner.err.log"
 export EC_PLIST_PATH="/Library/LaunchDaemons/${EC_LABEL}.plist"
 export EC_VENV_PYTHON="${EC_INSTALL_DIR}/.venv/bin/python"
 export EC_WATCHDOG_SCRIPT="${EC_INSTALL_DIR}/email_cleaner_watchdog.py"
@@ -196,7 +200,8 @@ sudo -v
 ```bash
 sudo install -d -o root -g wheel -m 755 "$EC_INSTALL_DIR"
 sudo install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 700 "$EC_SUPPORT_DIR"
-sudo install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 755 "$EC_LOG_DIR"
+sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 644 /dev/null "$EC_LOG_OUT_PATH"
+sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 644 /dev/null "$EC_LOG_ERR_PATH"
 ```
 
 ### 6) Copy code to `/usr/local/libexec/EmailCleaner`
@@ -324,6 +329,7 @@ cat >"$TMP_PLIST" <<PLIST
   <string>${EC_INSTALL_DIR}</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/bash</string>
     <string>${EC_LAUNCHER_SCRIPT}</string>
   </array>
   <key>RunAtLoad</key>
@@ -336,9 +342,9 @@ cat >"$TMP_PLIST" <<PLIST
     <dict><key>Minute</key><integer>45</integer></dict>
   </array>
   <key>StandardOutPath</key>
-  <string>${EC_LOG_DIR}/email-cleaner.out.log</string>
+  <string>${EC_LOG_OUT_PATH}</string>
   <key>StandardErrorPath</key>
-  <string>${EC_LOG_DIR}/email-cleaner.err.log</string>
+  <string>${EC_LOG_ERR_PATH}</string>
   <key>ProcessType</key>
   <string>Background</string>
 </dict>
@@ -391,8 +397,8 @@ sudo launchctl kickstart -k "system/${EC_LABEL}"
 
 ```bash
 sudo launchctl print "system/${EC_LABEL}"
-tail -n 100 "${EC_LOG_DIR}/email-cleaner.out.log"
-tail -n 100 "${EC_LOG_DIR}/email-cleaner.err.log"
+tail -n 100 "${EC_LOG_OUT_PATH}"
+tail -n 100 "${EC_LOG_ERR_PATH}"
 sudo test -s "${EC_OPENAI_ENV_FILE}" && echo "openai env file present"
 ```
 
@@ -481,7 +487,8 @@ What the script removes:
 1. `/Library/LaunchDaemons/<label>.plist`
 2. `/usr/local/libexec/EmailCleaner`
 3. `/Library/Application Support/EmailCleaner` (includes `openai.env`, config files, and state)
-4. `/Library/Logs/EmailCleaner`
+4. `/Library/Logs/email-cleaner.out.log` and `/Library/Logs/email-cleaner.err.log`
+5. Optional rotated archives for those log files
 
 ### Option B: Full Manual Uninstall (No Script)
 
@@ -492,7 +499,8 @@ export EC_LABEL="com.emailcleaner.daemon"  # use your custom label if you instal
 export EC_PLIST_PATH="/Library/LaunchDaemons/${EC_LABEL}.plist"
 export EC_INSTALL_DIR="/usr/local/libexec/EmailCleaner"
 export EC_SUPPORT_DIR="/Library/Application Support/EmailCleaner"
-export EC_LOG_DIR="/Library/Logs/EmailCleaner"
+export EC_LOG_OUT_PATH="/Library/Logs/email-cleaner.out.log"
+export EC_LOG_ERR_PATH="/Library/Logs/email-cleaner.err.log"
 ```
 
 Stop/disable daemon (if present):
@@ -502,13 +510,13 @@ sudo launchctl disable "system/${EC_LABEL}" >/dev/null 2>&1 || true
 sudo launchctl bootout system "$EC_PLIST_PATH" >/dev/null 2>&1 || true
 ```
 
-Remove daemon plist and installed runtime directories:
+Remove daemon plist, installed runtime directories, and log files:
 
 ```bash
 sudo rm -f "$EC_PLIST_PATH"
 sudo rm -rf "$EC_INSTALL_DIR"
 sudo rm -rf "$EC_SUPPORT_DIR"
-sudo rm -rf "$EC_LOG_DIR"
+sudo rm -f "$EC_LOG_OUT_PATH" "$EC_LOG_ERR_PATH" "$EC_LOG_OUT_PATH".[0-9]* "$EC_LOG_ERR_PATH".[0-9]*
 ```
 
 Optional post-checks:
@@ -517,7 +525,7 @@ Optional post-checks:
 test ! -e "$EC_PLIST_PATH" && echo "plist removed"
 test ! -e "$EC_INSTALL_DIR" && echo "code removed"
 test ! -e "$EC_SUPPORT_DIR" && echo "config/state removed"
-test ! -e "$EC_LOG_DIR" && echo "logs removed"
+test ! -e "$EC_LOG_OUT_PATH" && test ! -e "$EC_LOG_ERR_PATH" && echo "logs removed"
 ```
 
 ## Security Notes
@@ -537,8 +545,8 @@ test ! -e "$EC_LOG_DIR" && echo "logs removed"
 
 If you installed EmailCleaner as a LaunchDaemon, macOS writes stdout/stderr to:
 
-- `/Library/Logs/EmailCleaner/email-cleaner.out.log`
-- `/Library/Logs/EmailCleaner/email-cleaner.err.log`
+- `/Library/Logs/email-cleaner.out.log`
+- `/Library/Logs/email-cleaner.err.log`
 
 By default, those files are not rotated by EmailCleaner itself. Adding an optional
 `newsyslog` rule keeps them from growing without bound by rotating them daily and
@@ -555,8 +563,8 @@ RUN_USER="$(id -un)"
 RUN_GROUP="$(id -gn "$RUN_USER")"
 
 sudo tee /etc/newsyslog.d/emailcleaner.conf >/dev/null <<EOF
-/Library/Logs/EmailCleaner/email-cleaner.out.log  ${RUN_USER}:${RUN_GROUP}  600  30  *  \$D0  N
-/Library/Logs/EmailCleaner/email-cleaner.err.log  ${RUN_USER}:${RUN_GROUP}  600  30  *  \$D0  N
+/Library/Logs/email-cleaner.out.log  ${RUN_USER}:${RUN_GROUP}  600  30  *  \$D0  N
+/Library/Logs/email-cleaner.err.log  ${RUN_USER}:${RUN_GROUP}  600  30  *  \$D0  N
 EOF
 ```
 
@@ -576,14 +584,14 @@ Rule behavior:
 Dry-run validation:
 
 ```bash
-sudo newsyslog -nv /Library/Logs/EmailCleaner/email-cleaner.out.log /Library/Logs/EmailCleaner/email-cleaner.err.log
+sudo newsyslog -nv /Library/Logs/email-cleaner.out.log /Library/Logs/email-cleaner.err.log
 ```
 
 Optional forced rotation test:
 
 ```bash
-sudo newsyslog -F /Library/Logs/EmailCleaner/email-cleaner.out.log /Library/Logs/EmailCleaner/email-cleaner.err.log
-ls -l /Library/Logs/EmailCleaner
+sudo newsyslog -F /Library/Logs/email-cleaner.out.log /Library/Logs/email-cleaner.err.log
+ls -l /Library/Logs/email-cleaner*
 ```
 
 Expected result:
@@ -606,5 +614,5 @@ This only removes the rotation rule. It does not delete any existing log files.
 If you also want to remove existing rotated EmailCleaner log archives:
 
 ```bash
-sudo rm -f /Library/Logs/EmailCleaner/email-cleaner.out.log.[0-9]* /Library/Logs/EmailCleaner/email-cleaner.err.log.[0-9]*
+sudo rm -f /Library/Logs/email-cleaner.out.log.[0-9]* /Library/Logs/email-cleaner.err.log.[0-9]*
 ```
