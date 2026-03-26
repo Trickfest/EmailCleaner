@@ -6,7 +6,7 @@ usage() {
 Install EmailCleaner as a macOS LaunchDaemon.
 
 Usage:
-  scripts/install_launchdaemon.sh [--interval 15|30] [--user USERNAME] [--label LAUNCHD_LABEL] [--max-runtime-seconds SECONDS] [--watchdog-grace-seconds SECONDS]
+  scripts/install_launchdaemon.sh [--interval 15|30] [--user USERNAME] [--label LAUNCHD_LABEL] [--max-runtime-seconds SECONDS] [--watchdog-grace-seconds SECONDS] [--overwrite-rules] [--overwrite-config] [--overwrite-accounts]
 
 Options:
   --interval  Run interval in minutes. Allowed values: 15 or 30. Default: 15.
@@ -19,15 +19,26 @@ Options:
   --watchdog-grace-seconds
               SIGTERM grace period before watchdog SIGKILL.
               Default: 15.
+  --overwrite-rules
+              Replace installed rules.json with repo-root rules.json.
+              Default: preserve installed rules.json if present.
+  --overwrite-config
+              Replace installed config.json with repo-root config.json.
+              Default: preserve installed config.json if present.
+  --overwrite-accounts
+              Replace installed accounts.json with repo-root accounts.json.
+              Default: preserve installed accounts.json if present.
   -h, --help  Show this help text.
 
 Notes:
   - Run this script as your normal user (not root). It will use sudo as needed.
   - OPENAI_API_KEY must be set in your current shell before running this script.
-  - It expects local runtime files in the repo root:
+  - Initial install expects local runtime files in the repo root:
       rules.json, config.json, accounts.json
-  - If accounts.json is missing, the script will try to generate it from
-    EMAIL_CLEANER_* environment variables.
+  - On reinstall, installed runtime files are preserved by default unless you
+    pass the matching --overwrite-* flag.
+  - If accounts.json is needed but missing, the script will try to generate it
+    from EMAIL_CLEANER_* environment variables.
 EOF
 }
 
@@ -49,6 +60,9 @@ RUN_USER="$(id -un)"
 LABEL="${EC_LABEL:-com.emailcleaner.daemon}"
 MAX_RUNTIME_SECONDS="3600"
 WATCHDOG_GRACE_SECONDS="15"
+OVERWRITE_RULES="0"
+OVERWRITE_CONFIG="0"
+OVERWRITE_ACCOUNTS="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -76,6 +90,18 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail "--watchdog-grace-seconds requires a value."
       WATCHDOG_GRACE_SECONDS="$2"
       shift 2
+      ;;
+    --overwrite-rules)
+      OVERWRITE_RULES="1"
+      shift
+      ;;
+    --overwrite-config)
+      OVERWRITE_CONFIG="1"
+      shift
+      ;;
+    --overwrite-accounts)
+      OVERWRITE_ACCOUNTS="1"
+      shift
       ;;
     -h|--help)
       usage
@@ -126,6 +152,26 @@ OPENAI_ENV_PATH="${APP_SUPPORT_DIR}/openai.env"
 RULES_SRC="${REPO_ROOT}/rules.json"
 CONFIG_SRC="${REPO_ROOT}/config.json"
 ACCOUNTS_SRC="${REPO_ROOT}/accounts.json"
+RULES_DEST="${APP_SUPPORT_DIR}/rules.json"
+CONFIG_DEST="${APP_SUPPORT_DIR}/config.json"
+ACCOUNTS_DEST="${APP_SUPPORT_DIR}/accounts.json"
+
+
+install_runtime_file() {
+  local source_path="$1"
+  local dest_path="$2"
+  local preserve_existing="$3"
+  local label="$4"
+  local missing_hint="$5"
+
+  if [[ "$preserve_existing" == "1" && -f "$dest_path" ]]; then
+    info "Preserving existing ${label} at ${dest_path}."
+    return 0
+  fi
+
+  [[ -f "$source_path" ]] || fail "Missing ${source_path}. ${missing_hint}"
+  sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$source_path" "$dest_path"
+}
 
 generate_accounts_json_from_env() {
   local target="$1"
@@ -234,15 +280,10 @@ EOF
   rm -f "$tmp_launcher"
 }
 
-[[ -f "$RULES_SRC" ]] || fail "Missing ${RULES_SRC}. Create it from rules.example.json first."
-[[ -f "$CONFIG_SRC" ]] || fail "Missing ${CONFIG_SRC}. Create it from config.example.json first."
-
-if [[ ! -f "$ACCOUNTS_SRC" ]]; then
+if [[ ! -f "$ACCOUNTS_SRC" && ( "$OVERWRITE_ACCOUNTS" == "1" || ! -f "$ACCOUNTS_DEST" ) ]]; then
   info "accounts.json not found in repo root. Generating from EMAIL_CLEANER_* env vars."
   generate_accounts_json_from_env "$ACCOUNTS_SRC" || fail "Failed to generate accounts.json."
 fi
-
-[[ -f "$ACCOUNTS_SRC" ]] || fail "Missing ${ACCOUNTS_SRC}."
 
 info "Requesting sudo access."
 sudo -v
@@ -279,9 +320,24 @@ if [[ -f "${INSTALL_DIR}/requirements.txt" ]]; then
 fi
 
 info "Copying runtime config files to ${APP_SUPPORT_DIR}."
-sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$RULES_SRC" "${APP_SUPPORT_DIR}/rules.json"
-sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$CONFIG_SRC" "${APP_SUPPORT_DIR}/config.json"
-sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$ACCOUNTS_SRC" "${APP_SUPPORT_DIR}/accounts.json"
+install_runtime_file \
+  "$RULES_SRC" \
+  "$RULES_DEST" \
+  "$(( OVERWRITE_RULES == 0 ))" \
+  "rules.json" \
+  "Create it from rules.example.json first."
+install_runtime_file \
+  "$CONFIG_SRC" \
+  "$CONFIG_DEST" \
+  "$(( OVERWRITE_CONFIG == 0 ))" \
+  "config.json" \
+  "Create it from config.example.json first."
+install_runtime_file \
+  "$ACCOUNTS_SRC" \
+  "$ACCOUNTS_DEST" \
+  "$(( OVERWRITE_ACCOUNTS == 0 ))" \
+  "accounts.json" \
+  "Create it from accounts.example.json first or provide EMAIL_CLEANER_* env vars."
 if [[ ! -f "${APP_SUPPORT_DIR}/.email_cleaner_state.json" ]]; then
   sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 /dev/null "${APP_SUPPORT_DIR}/.email_cleaner_state.json"
 fi

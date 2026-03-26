@@ -388,6 +388,22 @@ def decode_header_value(value: str | None) -> str:
     return "".join(decoded_fragments).strip()
 
 
+def get_raw_header_values(message: email.message.Message, header_name: str) -> list[str]:
+    target_name = header_name.lower()
+    return [
+        value
+        for name, value in message.raw_items()
+        if name.lower() == target_name
+    ]
+
+
+def get_raw_header_value(message: email.message.Message, header_name: str) -> str | None:
+    values = get_raw_header_values(message, header_name)
+    if not values:
+        return None
+    return values[0]
+
+
 def cli_option_was_set(option_name: str, argv: list[str]) -> bool:
     option_prefix = f"{option_name}="
     return any(arg == option_name or arg.startswith(option_prefix) for arg in argv)
@@ -1892,21 +1908,30 @@ def fetch_message_summary(
         return None
 
     message = BytesParser(policy=policy.default).parsebytes(headers_raw)
-    from_header = message["From"]
-    if from_header is None:
+    raw_from_header = get_raw_header_value(message, "From")
+    if raw_from_header is None:
         sender = ""
         from_header_defects = ("MissingFromHeader",)
     else:
-        sender = decode_header_value(from_header)
-        from_header_defects = tuple(
-            type(defect).__name__ for defect in getattr(from_header, "defects", ())
-        )
+        sender = decode_header_value(raw_from_header)
+        try:
+            from_header = message["From"]
+        except Exception as error:
+            from_header_defects = (f"HeaderParseError:{type(error).__name__}",)
+        else:
+            if from_header is None:
+                from_header_defects = ("MissingFromHeader",)
+            else:
+                from_header_defects = tuple(
+                    type(defect).__name__
+                    for defect in getattr(from_header, "defects", ())
+                )
     sender_name = extract_sender_name(sender)
     sender_email = extract_sender_email(sender)
     sender_domain = extract_domain(sender_email)
     authentication_results = tuple(
         decode_header_value(value)
-        for value in message.get_all("Authentication-Results", [])
+        for value in get_raw_header_values(message, "Authentication-Results")
     )
     return MessageSummary(
         account_provider=account.provider,
@@ -1918,10 +1943,10 @@ def fetch_message_summary(
         sender_name=sender_name,
         sender_email=sender_email,
         sender_domain=sender_domain,
-        recipient=decode_header_value(message.get("To")),
-        subject=decode_header_value(message.get("Subject")),
-        date=decode_header_value(message.get("Date")),
-        message_id=decode_header_value(message.get("Message-ID")),
+        recipient=decode_header_value(get_raw_header_value(message, "To")),
+        subject=decode_header_value(get_raw_header_value(message, "Subject")),
+        date=decode_header_value(get_raw_header_value(message, "Date")),
+        message_id=decode_header_value(get_raw_header_value(message, "Message-ID")),
         authentication_results=authentication_results,
         from_header_defects=from_header_defects,
         size_bytes=size_bytes,

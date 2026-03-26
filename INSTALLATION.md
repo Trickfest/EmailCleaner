@@ -34,7 +34,7 @@ does not depend on a custom log subdirectory existing after boot or update.
 3. Xcode or Apple Command Line Tools installed so `/usr/bin/python3` is available.
 4. `/usr/bin/python3 -m venv` works on the target Mac.
 5. `OPENAI_API_KEY` is exported in your current shell before you run install commands.
-6. You have runtime files in repo root:
+6. For an initial install, you have runtime files in repo root:
 - `rules.json`
 - `config.json`
 - `accounts.json` (or env vars to generate it)
@@ -62,6 +62,23 @@ For 30-minute interval:
 cd /path/to/repo
 export OPENAI_API_KEY="your_openai_api_key_here"
 ./scripts/install_launchdaemon.sh --interval 30
+```
+
+By default, rerunning the installer preserves installed runtime copies of:
+
+- `rules.json`
+- `config.json`
+- `accounts.json`
+
+Use overwrite flags only for the file(s) you want to replace:
+
+```bash
+cd /path/to/repo
+export OPENAI_API_KEY="your_openai_api_key_here"
+./scripts/install_launchdaemon.sh \
+  --interval 15 \
+  --overwrite-rules \
+  --overwrite-config
 ```
 
 The installer always creates the daemon virtual environment from
@@ -247,11 +264,23 @@ fi
 
 ### 8) Copy runtime files into `/Library/Application Support/EmailCleaner`
 
+Mirror the script's default behavior by preserving any installed runtime file
+that already exists:
+
 ```bash
-sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$REPO_ROOT/rules.json" "${EC_SUPPORT_DIR}/rules.json"
-sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$REPO_ROOT/config.json" "${EC_SUPPORT_DIR}/config.json"
-sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$REPO_ROOT/accounts.json" "${EC_SUPPORT_DIR}/accounts.json"
+if [ ! -f "${EC_SUPPORT_DIR}/rules.json" ]; then
+  sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$REPO_ROOT/rules.json" "${EC_SUPPORT_DIR}/rules.json"
+fi
+if [ ! -f "${EC_SUPPORT_DIR}/config.json" ]; then
+  sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$REPO_ROOT/config.json" "${EC_SUPPORT_DIR}/config.json"
+fi
+if [ ! -f "${EC_SUPPORT_DIR}/accounts.json" ]; then
+  sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$REPO_ROOT/accounts.json" "${EC_SUPPORT_DIR}/accounts.json"
+fi
 ```
+
+To overwrite one of those installed files manually, rerun the matching `sudo install ...`
+command explicitly for that file.
 
 Create state file if it does not exist yet:
 
