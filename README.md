@@ -19,7 +19,7 @@ EmailCleaner currently supports Yahoo Mail and Gmail, with more providers planne
 ### macOS background setup
 
 For a beginner-friendly, end-to-end guide to installing EmailCleaner as a macOS LaunchDaemon
-(including Python environment setup, copying runtime config files, start/stop, updates, and uninstall),
+(including Python environment setup, copying runtime config files, start/stop, log reset, updates, and uninstall),
 see:
 
 - `INSTALLATION.md`

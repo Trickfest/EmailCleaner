@@ -1,11 +1,12 @@
 # EmailCleaner macOS LaunchDaemon Setup
 
-This guide explains two installation paths and two uninstall paths:
+This guide explains two installation paths, one maintenance helper, and two uninstall paths:
 
 1. One-shot install with `scripts/install_launchdaemon.sh`
 2. Full manual install (every step by hand)
-3. One-shot uninstall with `scripts/uninstall_launchdaemon.sh`
-4. Full manual uninstall (every step by hand)
+3. Reset daemon log files with `scripts/reset_launchdaemon_logs.sh`
+4. One-shot uninstall with `scripts/uninstall_launchdaemon.sh`
+5. Full manual uninstall (every step by hand)
 
 Use this if you want EmailCleaner to run automatically as a system background task on macOS.
 
@@ -471,6 +472,27 @@ Re-enable later:
 sudo launchctl enable "system/${EC_LABEL}"
 sudo launchctl bootstrap system "$EC_PLIST_PATH"
 sudo launchctl kickstart -k "system/${EC_LABEL}"
+```
+
+Reset daemon log files and restart the job:
+
+```bash
+cd /path/to/repo
+./scripts/reset_launchdaemon_logs.sh
+```
+
+If you only want to recreate/truncate the files without restarting the daemon:
+
+```bash
+cd /path/to/repo
+./scripts/reset_launchdaemon_logs.sh --no-restart
+```
+
+If you installed with a custom label:
+
+```bash
+cd /path/to/repo
+./scripts/reset_launchdaemon_logs.sh --label com.example.emailcleaner
 ```
 
 ## Updating After Repo Changes
