@@ -121,6 +121,7 @@ def test_main_returns_timeout_exit_code_and_writes_state(
         path: Path,
         accounts_state: dict[str, dict[str, dict[str, object]]],
         accounts: list[app.AccountCredentials],
+        daily_summary_state: dict[str, object] | None = None,
     ) -> None:
         save_calls.append((path, accounts_state, accounts))
 

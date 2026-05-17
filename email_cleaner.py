@@ -9,6 +9,7 @@ import imaplib
 import json
 import os
 import re
+import smtplib
 import ssl
 import sys
 import time
@@ -16,9 +17,10 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from email import policy
 from email.parser import BytesParser
-from email.utils import parseaddr
+from email.utils import formatdate, parseaddr
 from pathlib import Path
 from typing import Iterable
 
@@ -35,6 +37,16 @@ DEFAULT_IMAP_HOST_BY_PROVIDER = {
     PROVIDER_GMAIL: "imap.gmail.com",
 }
 DEFAULT_IMAP_PORT = 993
+DEFAULT_SMTP_HOST_BY_PROVIDER = {
+    PROVIDER_YAHOO: "smtp.mail.yahoo.com",
+    PROVIDER_GMAIL: "smtp.gmail.com",
+}
+DEFAULT_SMTP_SSL_PORT = 465
+DEFAULT_DAILY_SUMMARY_SMTP_TIMEOUT_SECONDS = 30.0
+DEFAULT_DAILY_SUMMARY_SEND_TIME = "06:00"
+DEFAULT_DAILY_SUMMARY_INTERVAL_MINUTES = 1440
+DAILY_SUMMARY_STATE_RETENTION_DAYS = 8
+DAILY_SUMMARY_MAX_ERROR_LINES = 25
 DEFAULT_STATE_FILE = ".email_cleaner_state.json"
 DEFAULT_RULES_FILE = "rules.json"
 DEFAULT_ACCOUNTS_FILE = "accounts.json"
@@ -203,9 +215,19 @@ class OpenAIConfig:
 
 
 @dataclass(frozen=True)
+class DailySummaryConfig:
+    enabled: bool
+    summary_sender: str
+    summary_recipients: tuple[str, ...]
+    summary_time: str
+    summary_interval_minutes: int
+
+
+@dataclass(frozen=True)
 class AppConfig:
     imap: IMAPConfig
     openai: OpenAIConfig
+    daily_summary: DailySummaryConfig
     max_tracked_uids: int
 
 
@@ -217,6 +239,33 @@ class OpenAIDecision:
     reason: str
     delete_candidate: bool
     reason_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DailySummaryAccountStats:
+    provider: str
+    account_key: str
+    email: str
+    scanned_folders: int
+    messages_processed: int
+    delete_candidates: int
+    quarantined: int
+    quarantine_failures: int
+    llm_evaluated: int
+    llm_delete_candidates: int
+    cleanup_deleted: int
+    cleanup_failures: int
+    errors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DailySummaryRunRecord:
+    started_at: str
+    ended_at: str
+    status: str
+    exit_code: int
+    accounts: dict[str, DailySummaryAccountStats]
+    errors: tuple[str, ...]
 
 
 class RuntimeLimitExceeded(RuntimeError):
@@ -834,6 +883,13 @@ def default_app_config() -> AppConfig:
             max_body_chars=DEFAULT_OPENAI_MAX_BODY_CHARS,
             max_subject_chars=DEFAULT_OPENAI_MAX_SUBJECT_CHARS,
         ),
+        daily_summary=DailySummaryConfig(
+            enabled=False,
+            summary_sender="",
+            summary_recipients=(),
+            summary_time=DEFAULT_DAILY_SUMMARY_SEND_TIME,
+            summary_interval_minutes=DEFAULT_DAILY_SUMMARY_INTERVAL_MINUTES,
+        ),
         max_tracked_uids=DEFAULT_MAX_TRACKED_UIDS,
     )
 
@@ -855,6 +911,63 @@ def parse_nonempty_string_config(raw_value: object, source: str, default: str) -
     if not cleaned:
         raise ValueError(f"{source} cannot be empty.")
     return cleaned
+
+
+def parse_optional_string_config(raw_value: object, source: str, default: str = "") -> str:
+    if raw_value is None:
+        return default
+    if not isinstance(raw_value, str):
+        raise ValueError(f"{source} must be a string.")
+    return raw_value.strip()
+
+
+def parse_summary_time_config(raw_value: object, source: str, default: str) -> str:
+    value = parse_nonempty_string_config(raw_value, source, default)
+    match = re.fullmatch(r"(\d{1,2}):([0-5]\d)", value)
+    if not match:
+        raise ValueError(f"{source} must be a local time in HH:MM 24-hour format.")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23:
+        raise ValueError(f"{source} hour must be between 00 and 23.")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def parse_summary_recipients_config(raw_value: object, source: str) -> tuple[str, ...]:
+    raw_text = parse_optional_string_config(raw_value, source)
+    if not raw_text:
+        return ()
+
+    recipients: list[str] = []
+    seen: set[str] = set()
+    for part in raw_text.split(","):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        _display_name, address = parseaddr(candidate)
+        cleaned = address.strip().lower()
+        if not cleaned or "@" not in cleaned or any(char.isspace() for char in cleaned):
+            raise ValueError(f"{source} has invalid email address {candidate!r}.")
+        if cleaned not in seen:
+            seen.add(cleaned)
+            recipients.append(cleaned)
+    return tuple(recipients)
+
+
+def parse_summary_sender_config(raw_value: object, source: str) -> str:
+    raw_text = parse_optional_string_config(raw_value, source)
+    if not raw_text:
+        return ""
+    separator = ":" if ":" in raw_text else "."
+    provider_text, separator_found, account_key_text = raw_text.partition(separator)
+    if not separator_found:
+        raise ValueError(f"{source} must use provider:ACCOUNT_KEY format.")
+    provider = provider_text.strip().lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        supported = ", ".join(SUPPORTED_PROVIDERS)
+        raise ValueError(f"{source} provider must be one of: {supported}.")
+    account_key = normalize_account_key(account_key_text, source)
+    return account_state_key(provider, account_key)
 
 
 def parse_positive_number_config(raw_value: object, source: str, default: float) -> float:
@@ -915,6 +1028,12 @@ def load_app_config(path: Path) -> AppConfig:
     if not isinstance(openai_config_raw, dict):
         raise ValueError(f"Config file {path} has invalid openai section.")
 
+    daily_summary_config_raw = raw.get("daily_summary", {})
+    if daily_summary_config_raw is None:
+        daily_summary_config_raw = {}
+    if not isinstance(daily_summary_config_raw, dict):
+        raise ValueError(f"Config file {path} has invalid daily_summary section.")
+
     imap_defaults = defaults.imap
     imap_config = IMAPConfig(
         timeout_seconds=parse_positive_number_config(
@@ -967,9 +1086,48 @@ def load_app_config(path: Path) -> AppConfig:
             openai_defaults.max_subject_chars,
         ),
     )
+
+    daily_summary_defaults = defaults.daily_summary
+    daily_summary_enabled = parse_boolean_config(
+        daily_summary_config_raw.get("enabled"),
+        "daily_summary.enabled",
+        daily_summary_defaults.enabled,
+    )
+    daily_summary_config = DailySummaryConfig(
+        enabled=daily_summary_enabled,
+        summary_sender=parse_summary_sender_config(
+            daily_summary_config_raw.get("summary_sender"),
+            "daily_summary.summary_sender",
+        ),
+        summary_recipients=parse_summary_recipients_config(
+            daily_summary_config_raw.get("summary_recipients"),
+            "daily_summary.summary_recipients",
+        ),
+        summary_time=parse_summary_time_config(
+            daily_summary_config_raw.get("summary_time"),
+            "daily_summary.summary_time",
+            daily_summary_defaults.summary_time,
+        ),
+        summary_interval_minutes=parse_positive_int_config(
+            daily_summary_config_raw.get("summary_interval_minutes"),
+            "daily_summary.summary_interval_minutes",
+            daily_summary_defaults.summary_interval_minutes,
+        ),
+    )
+    if daily_summary_config.enabled:
+        if not daily_summary_config.summary_sender:
+            raise ValueError(
+                "daily_summary.summary_sender is required when daily_summary.enabled is true."
+            )
+        if not daily_summary_config.summary_recipients:
+            raise ValueError(
+                "daily_summary.summary_recipients is required when daily_summary.enabled is true."
+            )
+
     return AppConfig(
         imap=imap_config,
         openai=openai_config,
+        daily_summary=daily_summary_config,
         max_tracked_uids=parse_positive_int_config(
             raw.get("max_tracked_uids"),
             "max_tracked_uids",
@@ -999,6 +1157,30 @@ def resolve_openai_api_key(openai_config: OpenAIConfig) -> str | None:
             f"OpenAI classification is enabled but {ENV_OPENAI_API_KEY} is not set."
         )
     return api_key
+
+
+def resolve_daily_summary_sender_account(
+    daily_summary_config: DailySummaryConfig,
+    accounts: list[AccountCredentials],
+) -> AccountCredentials | None:
+    if not daily_summary_config.enabled:
+        return None
+    sender_key = daily_summary_config.summary_sender
+    matches = [
+        account
+        for account in accounts
+        if account_state_key(account.provider, account.account_key) == sender_key
+    ]
+    if len(matches) == 1:
+        return matches[0]
+
+    available = ", ".join(
+        account_state_key(account.provider, account.account_key) for account in accounts
+    ) or "none"
+    raise ValueError(
+        "daily_summary.summary_sender must match exactly one configured account. "
+        f"Configured value: {sender_key!r}. Available accounts: {available}."
+    )
 
 
 def parse_boolean_rule(raw_value: object, source: str) -> bool:
@@ -1658,10 +1840,58 @@ def load_state(path: Path) -> dict[str, dict[str, dict[str, object]]]:
     return {}
 
 
+def empty_daily_summary_state() -> dict[str, object]:
+    return {
+        "last_sent_at": "",
+        "last_sent_local_date": "",
+        "run_records": [],
+    }
+
+
+def load_daily_summary_state(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return empty_daily_summary_state()
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            raw = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return empty_daily_summary_state()
+
+    if not isinstance(raw, dict):
+        return empty_daily_summary_state()
+
+    raw_summary = raw.get("daily_summary", {})
+    if not isinstance(raw_summary, dict):
+        return empty_daily_summary_state()
+
+    last_sent_local_date = raw_summary.get("last_sent_local_date", "")
+    if not isinstance(last_sent_local_date, str):
+        last_sent_local_date = ""
+
+    last_sent_at = raw_summary.get("last_sent_at", "")
+    if not isinstance(last_sent_at, str):
+        last_sent_at = ""
+
+    raw_records = raw_summary.get("run_records", [])
+    run_records = (
+        [record for record in raw_records if isinstance(record, dict)]
+        if isinstance(raw_records, list)
+        else []
+    )
+
+    return {
+        "last_sent_at": last_sent_at,
+        "last_sent_local_date": last_sent_local_date,
+        "run_records": run_records,
+    }
+
+
 def save_state(
     path: Path,
     accounts_state: dict[str, dict[str, dict[str, object]]],
     accounts: list[AccountCredentials],
+    daily_summary_state: dict[str, object] | None = None,
 ) -> None:
     account_by_state_key = {
         account_state_key(account.provider, account.account_key): account
@@ -1684,7 +1914,9 @@ def save_state(
             "folders": accounts_state[state_key],
         }
 
-    payload = {"accounts": payload_accounts}
+    payload: dict[str, object] = {"accounts": payload_accounts}
+    if daily_summary_state is not None:
+        payload["daily_summary"] = daily_summary_state
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2, sort_keys=True)
 
@@ -2143,6 +2375,368 @@ def scan_new_messages(
     return messages, folders_state, scanned_folder_count
 
 
+def daily_summary_cleanup_errors(cleanup_result: QuarantineCleanupResult) -> tuple[str, ...]:
+    errors: list[str] = []
+    if cleanup_result.status in {"SELECT_FAILED", "SEARCH_FAILED", "EXPUNGE_FAILED"}:
+        detail = f": {cleanup_result.detail}" if cleanup_result.detail else ""
+        errors.append(f"quarantine cleanup {cleanup_result.status.lower()}{detail}")
+    if cleanup_result.store_failed_count:
+        errors.append(
+            "quarantine cleanup partial failure: "
+            f"{cleanup_result.store_failed_count} message(s) could not be marked for deletion"
+        )
+    return tuple(errors)
+
+
+def build_daily_summary_account_stats(
+    account: AccountCredentials,
+    messages: list[MessageSummary],
+    scanned_folder_count: int,
+    cleanup_result: QuarantineCleanupResult,
+    errors: Iterable[str] = (),
+) -> DailySummaryAccountStats:
+    delete_candidates = sum(
+        1 for message in messages if not message.never_filter_match and message.delete_candidate
+    )
+    cleanup_failure_count = 0
+    if cleanup_result.status in {"SELECT_FAILED", "SEARCH_FAILED", "EXPUNGE_FAILED"}:
+        cleanup_failure_count += 1
+    if cleanup_result.store_failed_count:
+        cleanup_failure_count += cleanup_result.store_failed_count
+
+    combined_errors = tuple(errors) + daily_summary_cleanup_errors(cleanup_result)
+
+    return DailySummaryAccountStats(
+        provider=account.provider,
+        account_key=account.account_key,
+        email=account.email,
+        scanned_folders=scanned_folder_count,
+        messages_processed=len(messages),
+        delete_candidates=delete_candidates,
+        quarantined=sum(1 for message in messages if message.action == "QUARANTINED"),
+        quarantine_failures=sum(1 for message in messages if message.action == "QUARANTINE_FAILED"),
+        llm_evaluated=sum(1 for message in messages if message.llm_evaluated),
+        llm_delete_candidates=sum(
+            1
+            for message in messages
+            if message.llm_decision == "delete_candidate" and message.delete_candidate
+        ),
+        cleanup_deleted=cleanup_result.deleted_count,
+        cleanup_failures=cleanup_failure_count,
+        errors=combined_errors,
+    )
+
+
+def build_empty_daily_summary_account_stats(
+    account: AccountCredentials,
+    errors: Iterable[str] = (),
+) -> DailySummaryAccountStats:
+    return DailySummaryAccountStats(
+        provider=account.provider,
+        account_key=account.account_key,
+        email=account.email,
+        scanned_folders=0,
+        messages_processed=0,
+        delete_candidates=0,
+        quarantined=0,
+        quarantine_failures=0,
+        llm_evaluated=0,
+        llm_delete_candidates=0,
+        cleanup_deleted=0,
+        cleanup_failures=0,
+        errors=tuple(errors),
+    )
+
+
+def parse_state_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed
+
+
+def daily_summary_record_timestamp(record: dict[str, object]) -> datetime | None:
+    return parse_state_datetime(record.get("ended_at")) or parse_state_datetime(
+        record.get("started_at")
+    )
+
+
+def append_daily_summary_run_record(
+    daily_summary_state: dict[str, object],
+    record: DailySummaryRunRecord,
+    now: datetime,
+    summary_interval_minutes: int = DEFAULT_DAILY_SUMMARY_INTERVAL_MINUTES,
+) -> None:
+    raw_records = daily_summary_state.get("run_records", [])
+    run_records = list(raw_records) if isinstance(raw_records, list) else []
+    run_records.append(asdict(record))
+
+    interval_retention_days = (summary_interval_minutes + 1439) // 1440 + 1
+    retention_days = max(DAILY_SUMMARY_STATE_RETENTION_DAYS, interval_retention_days)
+    cutoff = now - timedelta(days=retention_days)
+    retained_records: list[dict[str, object]] = []
+    for raw_record in run_records:
+        if not isinstance(raw_record, dict):
+            continue
+        record_time = daily_summary_record_timestamp(raw_record)
+        if record_time is None or record_time >= cutoff:
+            retained_records.append(raw_record)
+
+    daily_summary_state["run_records"] = retained_records
+
+
+def summary_time_minutes(summary_time: str) -> int:
+    hour_text, minute_text = summary_time.split(":", 1)
+    return int(hour_text) * 60 + int(minute_text)
+
+
+def is_daily_summary_due(
+    daily_summary_config: DailySummaryConfig,
+    daily_summary_state: dict[str, object],
+    now: datetime,
+) -> bool:
+    if not daily_summary_config.enabled:
+        return False
+
+    now_minutes = now.hour * 60 + now.minute
+    if now_minutes < summary_time_minutes(daily_summary_config.summary_time):
+        return False
+
+    last_sent_at = parse_state_datetime(daily_summary_state.get("last_sent_at"))
+    if last_sent_at is not None:
+        next_due_at = last_sent_at + timedelta(
+            minutes=daily_summary_config.summary_interval_minutes
+        )
+        return now >= next_due_at
+
+    last_sent_local_date = daily_summary_state.get("last_sent_local_date", "")
+    if last_sent_local_date == now.date().isoformat():
+        return False
+
+    return True
+
+
+def int_stat(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+def empty_account_totals(account: AccountCredentials) -> dict[str, object]:
+    return {
+        "provider": account.provider,
+        "account_key": account.account_key,
+        "email": account.email,
+        "messages_processed": 0,
+        "delete_candidates": 0,
+        "quarantined": 0,
+        "quarantine_failures": 0,
+        "llm_evaluated": 0,
+        "llm_delete_candidates": 0,
+        "cleanup_deleted": 0,
+        "cleanup_failures": 0,
+        "errors": [],
+    }
+
+
+def aggregate_daily_summary(
+    daily_summary_state: dict[str, object],
+    accounts: list[AccountCredentials],
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, object]:
+    account_totals = {
+        account_state_key(account.provider, account.account_key): empty_account_totals(account)
+        for account in accounts
+    }
+    totals = {
+        "messages_processed": 0,
+        "delete_candidates": 0,
+        "quarantined": 0,
+        "quarantine_failures": 0,
+        "llm_evaluated": 0,
+        "llm_delete_candidates": 0,
+        "cleanup_deleted": 0,
+        "cleanup_failures": 0,
+    }
+    errors: list[str] = []
+    run_count = 0
+
+    raw_records = daily_summary_state.get("run_records", [])
+    records = raw_records if isinstance(raw_records, list) else []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        record_time = daily_summary_record_timestamp(record)
+        if record_time is None or record_time < window_start or record_time > window_end:
+            continue
+        run_count += 1
+        record_time_text = record_time.isoformat(timespec="seconds")
+
+        raw_record_errors = record.get("errors", [])
+        if isinstance(raw_record_errors, list):
+            for error in raw_record_errors:
+                if isinstance(error, str) and error.strip():
+                    errors.append(f"{record_time_text}: {error.strip()}")
+
+        raw_accounts = record.get("accounts", {})
+        if not isinstance(raw_accounts, dict):
+            continue
+        for state_key, raw_account_stats in raw_accounts.items():
+            if not isinstance(state_key, str) or not isinstance(raw_account_stats, dict):
+                continue
+            account_total = account_totals.setdefault(
+                state_key,
+                {
+                    "provider": str(raw_account_stats.get("provider", "")),
+                    "account_key": str(raw_account_stats.get("account_key", state_key)),
+                    "email": str(raw_account_stats.get("email", "")),
+                    "messages_processed": 0,
+                    "delete_candidates": 0,
+                    "quarantined": 0,
+                    "quarantine_failures": 0,
+                    "llm_evaluated": 0,
+                    "llm_delete_candidates": 0,
+                    "cleanup_deleted": 0,
+                    "cleanup_failures": 0,
+                    "errors": [],
+                },
+            )
+            for key in totals:
+                value = int_stat(raw_account_stats, key)
+                totals[key] += value
+                account_total[key] = int(account_total[key]) + value
+
+            account_errors = account_total["errors"]
+            raw_account_errors = raw_account_stats.get("errors", [])
+            if isinstance(account_errors, list) and isinstance(raw_account_errors, list):
+                for error in raw_account_errors:
+                    if isinstance(error, str) and error.strip():
+                        error_text = f"{state_key}: {error.strip()}"
+                        account_errors.append(error_text)
+                        errors.append(f"{record_time_text}: {error_text}")
+
+    return {
+        "run_count": run_count,
+        "totals": totals,
+        "accounts": account_totals,
+        "errors": errors,
+    }
+
+
+def format_daily_summary_body(
+    daily_summary_state: dict[str, object],
+    accounts: list[AccountCredentials],
+    window_start: datetime,
+    window_end: datetime,
+) -> str:
+    summary = aggregate_daily_summary(
+        daily_summary_state=daily_summary_state,
+        accounts=accounts,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    totals = summary["totals"]
+    errors = summary["errors"]
+    lines = [
+        "EmailCleaner summary",
+        f"Window: {window_start.isoformat(timespec='seconds')} to {window_end.isoformat(timespec='seconds')}",
+        f"Runs included: {summary['run_count']}",
+        f"Status: {'errors detected' if errors else 'ok'}",
+        "",
+        "Totals:",
+        f"  Messages processed: {totals['messages_processed']}",
+        f"  Delete candidates: {totals['delete_candidates']}",
+        f"  Quarantined: {totals['quarantined']}",
+        f"  Quarantine failures: {totals['quarantine_failures']}",
+        f"  OpenAI evaluated: {totals['llm_evaluated']}",
+        f"  OpenAI delete candidates: {totals['llm_delete_candidates']}",
+        f"  Quarantine cleanup deleted: {totals['cleanup_deleted']}",
+        f"  Quarantine cleanup failures: {totals['cleanup_failures']}",
+        "",
+        "Per account:",
+    ]
+
+    account_totals = summary["accounts"]
+    for state_key in sorted(account_totals):
+        account = account_totals[state_key]
+        account_label = f"{state_key} ({account['email']})" if account.get("email") else state_key
+        lines.extend(
+            [
+                f"  {account_label}",
+                f"    Messages processed: {account['messages_processed']}",
+                f"    Delete candidates: {account['delete_candidates']}",
+                f"    Quarantined: {account['quarantined']}",
+                f"    Quarantine failures: {account['quarantine_failures']}",
+                f"    OpenAI evaluated: {account['llm_evaluated']}",
+                f"    OpenAI delete candidates: {account['llm_delete_candidates']}",
+                f"    Quarantine cleanup deleted: {account['cleanup_deleted']}",
+                f"    Quarantine cleanup failures: {account['cleanup_failures']}",
+            ]
+        )
+
+    lines.append("")
+    lines.append("Errors:")
+    if not errors:
+        lines.append("  None")
+    else:
+        for error in errors[:DAILY_SUMMARY_MAX_ERROR_LINES]:
+            lines.append(f"  - {error}")
+        remaining_count = len(errors) - DAILY_SUMMARY_MAX_ERROR_LINES
+        if remaining_count > 0:
+            lines.append(f"  - ... {remaining_count} additional error(s) omitted")
+
+    return "\n".join(lines) + "\n"
+
+
+def resolve_smtp_host(provider: str) -> str:
+    host = DEFAULT_SMTP_HOST_BY_PROVIDER.get(provider)
+    if host:
+        return host
+    raise ValueError(f"Unsupported provider {provider!r} for SMTP host selection.")
+
+
+def send_daily_summary_email(
+    daily_summary_config: DailySummaryConfig,
+    sender_account: AccountCredentials,
+    accounts: list[AccountCredentials],
+    daily_summary_state: dict[str, object],
+    now: datetime,
+) -> None:
+    window_end = now
+    window_start = now - timedelta(
+        minutes=daily_summary_config.summary_interval_minutes
+    )
+    subject_date = now.date().isoformat()
+    message = EmailMessage()
+    message["Subject"] = f"EmailCleaner summary - {subject_date}"
+    message["From"] = sender_account.email
+    message["To"] = ", ".join(daily_summary_config.summary_recipients)
+    message["Date"] = formatdate(localtime=True)
+    message.set_content(
+        format_daily_summary_body(
+            daily_summary_state=daily_summary_state,
+            accounts=accounts,
+            window_start=window_start,
+            window_end=window_end,
+        )
+    )
+
+    with smtplib.SMTP_SSL(
+        resolve_smtp_host(sender_account.provider),
+        DEFAULT_SMTP_SSL_PORT,
+        timeout=DEFAULT_DAILY_SUMMARY_SMTP_TIMEOUT_SECONDS,
+    ) as smtp:
+        smtp.login(sender_account.email, sender_account.app_password)
+        smtp.send_message(message)
+
+
 def print_report(
     account: AccountCredentials,
     messages: list[MessageSummary],
@@ -2355,9 +2949,13 @@ def main() -> int:
         app_config = load_app_config(config_path)
         openai_api_key = resolve_openai_api_key(app_config.openai)
         scanner_rules = load_scanner_rules(rules_path)
-        configured_accounts = resolve_accounts(accounts_path)
+        all_configured_accounts = resolve_accounts(accounts_path)
+        daily_summary_sender_account = resolve_daily_summary_sender_account(
+            app_config.daily_summary,
+            all_configured_accounts,
+        )
         configured_accounts = filter_accounts(
-            configured_accounts,
+            all_configured_accounts,
             provider_filter=args.provider,
             account_key_filter=args.account_key,
         )
@@ -2371,8 +2969,10 @@ def main() -> int:
         argv,
     )
     accounts_state = load_state(state_path)
+    daily_summary_state = load_daily_summary_state(state_path)
 
-    scan_started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    scan_started = datetime.now().astimezone()
+    scan_started_at = scan_started.isoformat(timespec="seconds")
     print()
     print(
         f"Beginning scan for {len(configured_accounts)} configured account(s) at {scan_started_at}"
@@ -2390,6 +2990,7 @@ def main() -> int:
 
     all_messages: list[MessageSummary] = []
     account_errors: list[str] = []
+    daily_summary_account_stats: dict[str, DailySummaryAccountStats] = {}
     timeout_reason = ""
     context = ssl.create_default_context()
 
@@ -2402,6 +3003,7 @@ def main() -> int:
         if not isinstance(account_folders_state, dict):
             account_folders_state = {}
         account_label = f"{account.provider}:{account.account_key}"
+        account_stats_recorded = False
 
         try:
             runtime_budget.ensure_within_limit(f"main.account_start:{account_label}")
@@ -2436,9 +3038,17 @@ def main() -> int:
                             quarantine_folder = ensure_mailbox_exists(imap, DEFAULT_QUARANTINE_FOLDER)
                         except ValueError as error:
                             print_stderr(f"[{account_label}] {error}")
+                            error_text = str(error)
                             account_errors.append(
-                                f"{account_label} ({account.email}): {error}"
+                                f"{account_label} ({account.email}): {error_text}"
                             )
+                            daily_summary_account_stats[state_key] = (
+                                build_empty_daily_summary_account_stats(
+                                    account,
+                                    errors=(error_text,),
+                                )
+                            )
+                            account_stats_recorded = True
                             continue
 
                 messages, updated_state, scanned_count = scan_new_messages(
@@ -2464,6 +3074,13 @@ def main() -> int:
                 )
                 accounts_state[state_key] = updated_state
                 all_messages.extend(messages)
+                daily_summary_account_stats[state_key] = build_daily_summary_account_stats(
+                    account=account,
+                    messages=messages,
+                    scanned_folder_count=scanned_count,
+                    cleanup_result=cleanup_result,
+                )
+                account_stats_recorded = True
                 print_report(
                     account=account,
                     messages=messages,
@@ -2479,26 +3096,125 @@ def main() -> int:
         except RuntimeLimitExceeded as error:
             timeout_reason = str(error)
             print_stderr(f"Stopping scan due to runtime limit for account {account_label}: {error}")
+            if not account_stats_recorded:
+                daily_summary_account_stats[state_key] = build_empty_daily_summary_account_stats(
+                    account,
+                    errors=(f"runtime limit: {error}",),
+                )
             break
         except imaplib.IMAP4.error as error:
             print_stderr(f"IMAP error for account {account_label} ({account.email}): {error}")
-            account_errors.append(f"{account_label} ({account.email}): IMAP error: {error}")
+            error_text = f"IMAP error: {error}"
+            account_errors.append(f"{account_label} ({account.email}): {error_text}")
+            if not account_stats_recorded:
+                daily_summary_account_stats[state_key] = build_empty_daily_summary_account_stats(
+                    account,
+                    errors=(error_text,),
+                )
         except OSError as error:
             print_stderr(
                 f"Network or timeout error for account {account_label} ({account.email}): {error}"
             )
+            error_text = f"network or timeout error: {error}"
             account_errors.append(
-                f"{account_label} ({account.email}): network or timeout error: {error}"
+                f"{account_label} ({account.email}): {error_text}"
             )
+            if not account_stats_recorded:
+                daily_summary_account_stats[state_key] = build_empty_daily_summary_account_stats(
+                    account,
+                    errors=(error_text,),
+                )
+
+    scan_ended = datetime.now().astimezone()
+    run_errors: list[str] = []
+    if timeout_reason:
+        run_errors.append(timeout_reason)
+
+    if timeout_reason:
+        run_status = "timeout"
+        run_exit_code = EXIT_TIMEOUT
+    elif account_errors:
+        run_status = "error"
+        run_exit_code = 1
+    else:
+        run_status = "success"
+        run_exit_code = 0
+
+    if app_config.daily_summary.enabled and not args.dry_run:
+        append_daily_summary_run_record(
+            daily_summary_state,
+            DailySummaryRunRecord(
+                started_at=scan_started.isoformat(timespec="seconds"),
+                ended_at=scan_ended.isoformat(timespec="seconds"),
+                status=run_status,
+                exit_code=run_exit_code,
+                accounts=daily_summary_account_stats,
+                errors=tuple(run_errors),
+            ),
+            now=scan_ended,
+            summary_interval_minutes=app_config.daily_summary.summary_interval_minutes,
+        )
 
     if args.dry_run:
         print("Dry run enabled. Skipping state-file write.")
     else:
         try:
-            save_state(state_path, accounts_state, configured_accounts)
+            save_state(
+                state_path,
+                accounts_state,
+                all_configured_accounts,
+                daily_summary_state=daily_summary_state,
+            )
         except OSError as error:
             print_stderr(f"Could not write state file {state_path}: {error}")
             return 1
+
+    daily_summary_error = ""
+    if (
+        app_config.daily_summary.enabled
+        and not args.dry_run
+        and not timeout_reason
+        and daily_summary_sender_account is not None
+    ):
+        summary_now = datetime.now().astimezone()
+        if is_daily_summary_due(app_config.daily_summary, daily_summary_state, summary_now):
+            try:
+                send_daily_summary_email(
+                    daily_summary_config=app_config.daily_summary,
+                    sender_account=daily_summary_sender_account,
+                    accounts=all_configured_accounts,
+                    daily_summary_state=daily_summary_state,
+                    now=summary_now,
+                )
+                daily_summary_state["last_sent_at"] = summary_now.isoformat(timespec="seconds")
+                daily_summary_state["last_sent_local_date"] = summary_now.date().isoformat()
+                print(
+                    "Daily summary email sent to "
+                    f"{', '.join(app_config.daily_summary.summary_recipients)}."
+                )
+            except (OSError, smtplib.SMTPException, ValueError) as error:
+                daily_summary_error = f"Daily summary email failed: {error}"
+                print_stderr(daily_summary_error)
+                raw_records = daily_summary_state.get("run_records", [])
+                if isinstance(raw_records, list) and raw_records:
+                    latest_record = raw_records[-1]
+                    if isinstance(latest_record, dict):
+                        latest_errors = latest_record.get("errors", [])
+                        if not isinstance(latest_errors, list):
+                            latest_errors = []
+                        latest_errors.append(daily_summary_error)
+                        latest_record["errors"] = latest_errors
+
+            try:
+                save_state(
+                    state_path,
+                    accounts_state,
+                    all_configured_accounts,
+                    daily_summary_state=daily_summary_state,
+                )
+            except OSError as error:
+                print_stderr(f"Could not write state file {state_path}: {error}")
+                return 1
 
     if args.json_output:
         output_path = Path(args.json_output)
@@ -2514,6 +3230,9 @@ def main() -> int:
 
     if account_errors:
         print_stderr("One or more accounts failed: " + "; ".join(account_errors))
+        return 1
+
+    if daily_summary_error:
         return 1
 
     if timeout_reason:

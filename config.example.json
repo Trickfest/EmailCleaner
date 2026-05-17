@@ -3,6 +3,13 @@
   "imap": {
     "timeout_seconds": 60
   },
+  "daily_summary": {
+    "enabled": false,
+    "summary_sender": "gmail:MAIN",
+    "summary_recipients": "owner@example.test, backup@example.test",
+    "summary_time": "06:00",
+    "summary_interval_minutes": 1440
+  },
   "openai": {
     "enabled": false,
     "model": "gpt-5-mini",

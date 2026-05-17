@@ -1,12 +1,13 @@
 # EmailCleaner macOS LaunchDaemon Setup
 
-This guide explains two installation paths, one maintenance helper, and two uninstall paths:
+This guide covers runtime configuration, two installation paths, day-to-day
+operations, log rotation, and uninstall steps:
 
-1. One-shot install with `scripts/install_launchdaemon.sh`
-2. Full manual install (every step by hand)
-3. Reset daemon log files with `scripts/reset_launchdaemon_logs.sh`
-4. One-shot uninstall with `scripts/uninstall_launchdaemon.sh`
-5. Full manual uninstall (every step by hand)
+1. Runtime configuration files and summary-email settings
+2. One-shot install with `scripts/install_launchdaemon.sh`
+3. Full manual install (every step by hand)
+4. Operations, updates, and log checks
+5. One-shot or manual uninstall
 
 Use this if you want EmailCleaner to run automatically as a system background task on macOS.
 
@@ -36,9 +37,9 @@ does not depend on a custom log subdirectory existing after boot or update.
 4. `/usr/bin/python3 -m venv` works on the target Mac.
 5. `OPENAI_API_KEY` is exported in your current shell before you run install commands.
 6. For an initial install, you have runtime files in repo root:
-- `rules.json`
-- `config.json`
-- `accounts.json` (or env vars to generate it)
+   - `rules.json`
+   - `config.json`
+   - `accounts.json` (or env vars to generate it)
 
 Supported env var format for account generation:
 
@@ -46,6 +47,39 @@ Supported env var format for account generation:
 - `EMAIL_CLEANER_YAHOO_APP_PASSWORD_<KEY>`
 - `EMAIL_CLEANER_GMAIL_EMAIL_<KEY>`
 - `EMAIL_CLEANER_GMAIL_APP_PASSWORD_<KEY>`
+
+## Runtime Configuration
+
+The installer copies runtime files from the repo root to:
+
+- `/Library/Application Support/EmailCleaner/rules.json`
+- `/Library/Application Support/EmailCleaner/config.json`
+- `/Library/Application Support/EmailCleaner/accounts.json`
+- `/Library/Application Support/EmailCleaner/.email_cleaner_state.json`
+
+By default, rerunning the installer preserves installed copies of `rules.json`,
+`config.json`, and `accounts.json`. Use the matching `--overwrite-*` flag when
+you want a repo-root runtime file to replace the installed copy.
+
+Summary email settings live in `config.json`:
+
+- `daily_summary.enabled`: set to `true` to send summary emails.
+- `daily_summary.summary_sender`: one configured account in `provider:ACCOUNT_KEY`
+  format.
+- `daily_summary.summary_recipients`: comma-separated recipient list.
+- `daily_summary.summary_time`: local `HH:MM` time when the first eligible run
+  may send the summary.
+- `daily_summary.summary_interval_minutes`: minimum minutes between summaries
+  and the report lookback window.
+
+The LaunchDaemon schedule does not need a separate summary job. EmailCleaner
+sends the summary on the first scheduled run at or after `summary_time` once the
+configured interval has elapsed. For testing, set `summary_time` to `00:00` and
+`summary_interval_minutes` to `15`.
+
+Summary send attempts are logged in the same stdout/stderr files as scanner
+runs. A successful send prints `Daily summary email sent...`; SMTP or
+configuration failures are written to stderr and cause a non-zero run exit.
 
 ## Option A: One-Shot Installer Script
 
@@ -437,7 +471,10 @@ tail -n 100 "${EC_LOG_ERR_PATH}"
 sudo test -s "${EC_OPENAI_ENV_FILE}" && echo "openai env file present"
 ```
 
-## Daily Operations
+Summary email send attempts are logged in the same stdout/stderr files. SMTP or
+configuration failures are written to stderr and cause a non-zero run exit.
+
+## Operations
 
 If you are opening a new terminal, set these first:
 
@@ -502,6 +539,17 @@ Simplest path:
 ```bash
 cd /path/to/repo
 ./scripts/install_launchdaemon.sh --interval 15
+```
+
+To refresh installed runtime config from repo-root files, include only the
+overwrite flags for the files you intentionally want to replace:
+
+```bash
+cd /path/to/repo
+export OPENAI_API_KEY="your_openai_api_key_here"
+./scripts/install_launchdaemon.sh \
+  --interval 15 \
+  --overwrite-config
 ```
 
 If you installed manually, re-run manual steps:

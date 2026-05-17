@@ -1,42 +1,43 @@
 # EmailCleaner
 
-Scan email accounts and quarantine suspected spam and junk email.
+Scan Yahoo Mail and Gmail accounts for newly discovered unread messages, evaluate
+rules, and quarantine suspected spam or junk email.
 
-EmailCleaner currently supports Yahoo Mail and Gmail, with more providers planned.
+## What It Does
 
-## Current Scanner
+- Reads one or more Yahoo Mail and Gmail accounts from environment variables,
+  `accounts.json`, or both.
+- Scans Inbox and other allowed folders while skipping Spam, Trash, Junk, Bulk,
+  and `Quarantine` folders.
+- Applies deterministic keep/delete rules from `rules.json`.
+- Optionally uses OpenAI as a fallback classifier after deterministic rules do
+  not match.
+- Moves delete candidates to `Quarantine` by default, creating the folder if
+  needed.
+- Optionally sends aggregate summary emails from one configured account to one
+  or more configured recipients.
+- Tracks processed message UIDs in `.email_cleaner_state.json` so later runs
+  only process new unread messages.
 
-- Script: `email_cleaner.py`
-- Purpose: pull only **new unread** messages over IMAP (currently Yahoo Mail + Gmail)
-- Folder scope: scans Inbox and other folders, while skipping Spam/Trash
-- Rules: loads filtering config from `rules.json` (default)
-- Optional OpenAI post-rule filtering config from `config.json` (default)
-- Delete candidates are moved to `Quarantine` by default (folder is auto-created if needed)
-- `--hard-delete` is available as a future switch, but is currently a no-op placeholder
-- `--dry-run` simulates actions without moving/deleting messages or updating state
-- Optional account filtering flags (`--provider`, `--account-key`) let you scan a subset of accounts
+For macOS background installation with LaunchDaemon, see
+[`INSTALLATION.md`](INSTALLATION.md).
 
-### macOS background setup
+## Setup
 
-For a beginner-friendly, end-to-end guide to installing EmailCleaner as a macOS LaunchDaemon
-(including Python environment setup, copying runtime config files, start/stop, log reset, updates, and uninstall),
-see:
+### 1. Create App Passwords
 
-- `INSTALLATION.md`
-
-### 1. Create app passwords
-
-Both providers typically require app passwords for IMAP access.
+Both supported providers typically require app passwords for IMAP and SMTP
+access.
 
 1. Yahoo Mail: generate a Yahoo app password.
 2. Gmail: enable 2-Step Verification, then generate a Google app password.
-3. Keep both app passwords handy for account configuration.
+3. Keep app passwords available for account configuration.
 
-### 2. Configure accounts
+### 2. Configure Accounts
 
-You can configure credentials using environment variables, `accounts.json`, or both.
-The scanner merges by provider + account key suffix and requires a complete pair (`email` + `app_password`)
-for every discovered key.
+You can configure credentials using environment variables, `accounts.json`, or
+both. EmailCleaner merges accounts by provider and account key, and every
+discovered account must have both `email` and `app_password`.
 
 Environment variable format:
 
@@ -45,18 +46,16 @@ Environment variable format:
 - `EMAIL_CLEANER_GMAIL_EMAIL_<KEY>`
 - `EMAIL_CLEANER_GMAIL_APP_PASSWORD_<KEY>`
 
-Example (multiple accounts):
+Example:
 
 ```bash
 export EMAIL_CLEANER_YAHOO_EMAIL_JOHN="john@yahoo.example"
 export EMAIL_CLEANER_YAHOO_APP_PASSWORD_JOHN="john_app_password"
-export EMAIL_CLEANER_YAHOO_EMAIL_SALLY="sally@yahoo.example"
-export EMAIL_CLEANER_YAHOO_APP_PASSWORD_SALLY="sally_app_password"
 export EMAIL_CLEANER_GMAIL_EMAIL_JANE="jane@gmail.example"
 export EMAIL_CLEANER_GMAIL_APP_PASSWORD_JANE="jane_app_password"
 ```
 
-Optional `accounts.json` format (see also `accounts.example.json`):
+Optional `accounts.json` format:
 
 ```json
 {
@@ -64,10 +63,6 @@ Optional `accounts.json` format (see also `accounts.example.json`):
     "JOHN": {
       "email": "john@yahoo.example",
       "app_password": "john_app_password"
-    },
-    "SALLY": {
-      "email": "sally@yahoo.example",
-      "app_password": "sally_app_password"
     }
   },
   "gmail_accounts": {
@@ -87,29 +82,30 @@ For example, `EMAIL_CLEANER_GMAIL_EMAIL_JANE` in env and
 
 Configuration errors are fatal when:
 
-- A key has only email or only app password after merging all sources
-- The same key/field is defined more than once, except when env + `accounts.json` both
-  define the same full account (`email` and `app_password`) for that key. Exact full-account
+- A key has only email or only app password after merging all sources.
+- The same key/field is defined more than once, except when env +
+  `accounts.json` both define the same complete account. Exact full-account
   duplicates are allowed with a warning, and env values are used.
 
-### 3. Optional: Configure OpenAI fallback filtering
+### 3. Configure App Settings
 
 Use `config.example.json` as a template and copy it to local `config.json`.
 `config.json` is gitignored so local settings stay out of source control.
 
-Set API key in environment:
-
-```bash
-export OPENAI_API_KEY="your_api_key_here"
-```
-
-Example config:
+Example:
 
 ```json
 {
   "max_tracked_uids": 5000,
   "imap": {
     "timeout_seconds": 60
+  },
+  "daily_summary": {
+    "enabled": true,
+    "summary_sender": "gmail:JANE",
+    "summary_recipients": "owner@example.test, backup@example.test",
+    "summary_time": "06:00",
+    "summary_interval_minutes": 1440
   },
   "openai": {
     "enabled": true,
@@ -124,98 +120,69 @@ Example config:
 }
 ```
 
-Behavior:
+General settings:
+
+- `imap.timeout_seconds` bounds individual IMAP socket operations and defaults
+  to `60`.
+- `max_tracked_uids` controls the per-folder processed UID history limit in
+  state and defaults to `5000`.
+- `--max-tracked-uids` overrides `max_tracked_uids` for one run.
+
+Summary email settings:
+
+- `daily_summary.enabled=true` enables aggregate summary emails.
+- `daily_summary.summary_sender` must match exactly one configured account in
+  `provider:ACCOUNT_KEY` format, for example `gmail:JANE`.
+- `daily_summary.summary_recipients` is a comma-separated list of recipient
+  email addresses.
+- `daily_summary.summary_time` is local `HH:MM` time. EmailCleaner sends on the
+  first eligible scheduled run at or after that time.
+- `daily_summary.summary_interval_minutes` controls both the minimum time
+  between summary sends and the report lookback window. The default is `1440`
+  minutes. For testing, use a shorter value such as `15`.
+- Summaries contain aggregate totals only: processed/quarantined counts,
+  quarantine/OpenAI/cleanup counts, and errors. They do not include message
+  sender, subject, or body details.
+- Summary emails are skipped in `--dry-run` mode because dry runs do not write
+  state or perform mailbox/email side effects.
+
+OpenAI fallback settings:
 
 - OpenAI fallback runs only after deterministic rules do not match.
-- It never overrides `never_filter` or deterministic delete matches.
-- `imap.timeout_seconds` controls the IMAP socket timeout for connect/read/write operations and helps the scanner recover after sleep/wake network stalls.
+- It requires `openai.enabled=true` and `OPENAI_API_KEY` in the environment.
+- It never overrides `never_filter`.
 - `openai.system_prompt` is configurable in `config.json`.
-- If OpenAI returns `delete_candidate` below `confidence_threshold`, the message is kept.
-- If OpenAI request/parse fails, the message is kept.
-- `max_tracked_uids` configures the per-folder processed UID history limit in state.
-- `--max-tracked-uids` overrides `max_tracked_uids` for that run.
+- Only `decision=delete_candidate` with `confidence >= openai.confidence_threshold`
+  marks a message as a delete candidate.
+- API, network, or response-parse errors fail safe: the message is kept.
+- EmailCleaner sends only configured subject/body excerpts and required
+  metadata to OpenAI.
 
-### 4. Run the scanner
-
-```bash
-python3 email_cleaner.py
-```
-
-The same `rules.json` is applied to all configured accounts.
-
-Optional output and state controls:
+Set the API key only when OpenAI fallback is enabled:
 
 ```bash
-python3 email_cleaner.py \
-  --rules-file rules.json \
-  --accounts-file accounts.json \
-  --config-file config.json \
-  --state-file .email_cleaner_state.json \
-  --max-runtime-seconds 3600 \
-  --json-output /tmp/new_messages.json
+export OPENAI_API_KEY="your_api_key_here"
 ```
 
-Default state path is `.email_cleaner_state.json`.
-If `--max-runtime-seconds` is set and runtime exceeds the cap, the scan exits with code `124`.
-By default, EmailCleaner uses provider-specific IMAP hosts:
+### 4. Configure Rules
 
-- Yahoo: `imap.mail.yahoo.com`
-- Gmail: `imap.gmail.com`
-
-Use `--host` only if you want to override host selection for all accounts.
-
-Filter to a subset of accounts:
-
-```bash
-# Scan only Gmail accounts
-python3 email_cleaner.py --provider gmail
-
-# Scan only one account key within Gmail
-python3 email_cleaner.py --provider gmail --account-key JANE
-```
-
-Reset local app state (delete state file and exit):
-
-```bash
-python3 email_cleaner.py --reset-app
-```
-
-`--reset-app` is standalone mode: use only `--reset-app` and optional `--state-file`.
-
-Hard-delete placeholder mode (currently no-op for delete candidates):
-
-```bash
-python3 email_cleaner.py --hard-delete
-```
-
-Dry-run mode (show what would happen, but make no mailbox/state changes):
-
-```bash
-python3 email_cleaner.py --dry-run
-```
-
-### 5. Run tests
-
-Install `pytest` (if needed), then run the suite:
-
-```bash
-python3 -m pip install -r requirements-dev.txt
-python3 -m pytest -q
-```
-
-### Rules file (`rules.json`)
-
-Use `rules.example.json` as a template and copy it to a local `rules.json`.
+Use `rules.example.json` as a template and copy it to local `rules.json`.
 `rules.json` is gitignored so personal addresses/domains stay local.
 
 Current rules support:
 
-- `never_filter`: specific sender addresses or sender domains that should never be filtered/deleted
-- `always_delete`: sender addresses or sender domains that should always be marked as delete candidates
-- `quarantine_cleanup_days`: optional integer. When set, delete messages in `Quarantine` older than N days each run. If omitted, `null`, or not present, cleanup is disabled.
-- `delete_patterns.auth_triple_fail`: marks as delete candidate only when `Authentication-Results` reports `spf=fail`, `dkim=fail`, and `dmarc=fail` with no conflicting status values
-- `delete_patterns.malformed_from`: marks as delete candidate when the `From` header is missing, malformed, or cannot be parsed to a sender email address
-- `delete_patterns`: regex rules for sender (`From`), subject, and message body that mark messages as delete candidates
+- `never_filter`: sender addresses or domains that should never be filtered.
+- `always_delete`: sender addresses or domains that should always be marked as
+  delete candidates.
+- `quarantine_cleanup_days`: optional integer. When set, old messages in
+  `Quarantine` are deleted after that many days. If omitted, `null`, or not
+  present, cleanup is disabled.
+- `delete_patterns.auth_triple_fail`: marks as delete candidate only when SPF,
+  DKIM, and DMARC are all explicitly `fail` with no conflicting status values.
+- `delete_patterns.malformed_from`: marks as delete candidate when the `From`
+  header is missing, malformed, or cannot be parsed to a sender email address.
+- `delete_patterns.from_regex`, `subject_regex`, and `body_regex`: Python regex
+  patterns that mark matching messages as delete candidates.
 
 Example:
 
@@ -262,59 +229,117 @@ Example:
 }
 ```
 
-Regex notes:
-
-- Uses Python regex syntax
-- Matching uses `re.search` (pattern can match anywhere in the field)
-- You can embed flags inline (for example `(?i)` for case-insensitive)
-- Domain entries under `never_filter.domains` and `always_delete.domains` match the exact domain and all subdomains (for example `citi.com` matches `info6.citi.com`)
-- `delete_patterns.from_regex` checks both sender display name and sender email address
-- `delete_patterns.auth_triple_fail` only matches when all of SPF, DKIM, and DMARC are explicitly `fail`
-- `delete_patterns.auth_triple_fail` is conservative: if any mechanism has no value or mixed values (for example both `fail` and `pass` in different headers), it does not match
-- `delete_patterns.malformed_from` matches missing/defective `From` headers and cases where no sender email can be parsed
-
 Rule precedence:
 
-1. `never_filter` (highest priority)
+1. `never_filter`
 2. `always_delete`
 3. `delete_patterns.auth_triple_fail`
 4. `delete_patterns.malformed_from`
 5. `delete_patterns.from_regex`
 6. `delete_patterns.subject_regex`
 7. `delete_patterns.body_regex`
-8. OpenAI fallback stage (only when enabled in `config.json`)
+8. OpenAI fallback stage, only when enabled
 
-When new unread messages are pulled, each message is labeled as one of:
+Regex and matching notes:
 
-- `NEVER_FILTER` (matches a protected sender/domain)
-- `DELETE_CANDIDATE` (matches deterministic delete rules or OpenAI fallback)
-- `FILTER_ELIGIBLE` (no rule match)
+- Matching uses Python `re.search`.
+- Inline flags such as `(?i)` are supported.
+- Domain entries under `never_filter.domains` and `always_delete.domains` match
+  the exact domain and all subdomains.
+- `delete_patterns.from_regex` checks both sender display name and sender email
+  address.
+- `delete_patterns.auth_triple_fail` is conservative: missing or mixed auth
+  values do not match.
+
+## Running
+
+Basic scan:
+
+```bash
+python3 email_cleaner.py
+```
+
+Optional output and state controls:
+
+```bash
+python3 email_cleaner.py \
+  --rules-file rules.json \
+  --accounts-file accounts.json \
+  --config-file config.json \
+  --state-file .email_cleaner_state.json \
+  --max-runtime-seconds 3600 \
+  --json-output /tmp/new_messages.json
+```
+
+Default IMAP hosts:
+
+- Yahoo: `imap.mail.yahoo.com`
+- Gmail: `imap.gmail.com`
+
+Use `--host` only to override host selection for all accounts.
+
+Filter to a subset of accounts:
+
+```bash
+python3 email_cleaner.py --provider gmail
+python3 email_cleaner.py --provider gmail --account-key JANE
+```
+
+Other modes:
+
+```bash
+python3 email_cleaner.py --dry-run
+python3 email_cleaner.py --hard-delete
+python3 email_cleaner.py --reset-app
+```
+
+Mode details:
+
+- `--dry-run` performs no mailbox mutations and no state writes.
+- `--hard-delete` is currently a no-op placeholder for delete candidates.
+- `--reset-app` deletes the state file and exits. It may only be combined with
+  optional `--state-file`.
+- If `--max-runtime-seconds` is exceeded, the scan exits with code `124`.
+
+## Runtime Behavior
+
+Message labels:
+
+- `NEVER_FILTER`: matches a protected sender/domain.
+- `DELETE_CANDIDATE`: matches deterministic delete rules or OpenAI fallback.
+- `FILTER_ELIGIBLE`: no rule match.
 
 Delete-candidate actions:
 
-- Default: message is moved to `Quarantine`
-- `--hard-delete`: no-op placeholder (message is not deleted yet)
-- `--dry-run`: no message move/delete; output shows what would happen in normal mode
-- OpenAI fallback can still be called in `--dry-run` mode, but mailbox/state remain unchanged
+- Default: move to `Quarantine`.
+- `--hard-delete`: no-op placeholder.
+- `--dry-run`: report what would happen without mailbox or state changes.
 
-Quarantine cleanup behavior:
+Quarantine cleanup:
 
-- If `quarantine_cleanup_days` is configured, cleanup runs once per account after the scan.
-- Cleanup targets only the `Quarantine` folder and deletes messages older than N days.
-- In `--dry-run`, cleanup reports how many messages would be deleted and does not delete anything.
+- Runs once per account after the scan when `quarantine_cleanup_days` is set.
+- Targets only the `Quarantine` folder.
+- In `--dry-run`, reports how many messages would be deleted without deleting.
 
-### How "new messages" are handled
+State handling:
 
-- The script searches each folder for `UNSEEN` messages.
-- It stores processed message UIDs in a local state file, namespaced by provider, account key, and folder.
-- Stored processed UID history is trimmed per folder to `max_tracked_uids` (default 5000).
-- In `--dry-run` mode, it does not update the local state file.
-- On later runs, it only returns unread messages with UIDs it has not already returned.
-- If a folder's `UIDVALIDITY` changes, that folder's processed UID history is reset automatically.
+- State is stored in `.email_cleaner_state.json` by default.
+- Processed UIDs are namespaced by provider, account key, and folder.
+- Summary run history and last summary send time are stored in the same state
+  file when summaries are enabled.
+- In `--dry-run`, the state file is not updated.
+- If a folder's `UIDVALIDITY` changes, that folder's processed UID history is
+  reset automatically.
 
-### Notes
+Excluded folders include `Quarantine`, provider bulk folders, and folders
+identified as spam/trash/junk by IMAP flags or folder names containing `spam`,
+`trash`, `bulk`, or `junk` case-insensitively.
 
-- Default IMAP host (Yahoo): `imap.mail.yahoo.com`
-- Default IMAP host (Gmail): `imap.gmail.com`
-- Default port: `993`
-- Excluded folders include `Quarantine`, provider bulk folders (for Yahoo this includes `Bulk`), and folders identified as spam/trash/junk by IMAP flags or folder names containing `spam`, `trash`, `bulk`, or `junk` (case-insensitive).
+## Tests
+
+Install dev dependencies if needed, then run:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest -q
+```

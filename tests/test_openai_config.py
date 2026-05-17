@@ -25,6 +25,13 @@ def make_app_config(*, max_tracked_uids: int = 5000) -> app.AppConfig:
     return app.AppConfig(
         imap=app.IMAPConfig(timeout_seconds=60.0),
         openai=make_openai_config(),
+        daily_summary=app.DailySummaryConfig(
+            enabled=False,
+            summary_sender="",
+            summary_recipients=(),
+            summary_time="06:00",
+            summary_interval_minutes=1440,
+        ),
         max_tracked_uids=max_tracked_uids,
     )
 
@@ -52,6 +59,11 @@ def test_load_app_config_defaults_when_file_missing(tmp_path) -> None:
     assert config.openai.system_prompt
     assert config.imap.timeout_seconds == 60.0
     assert config.max_tracked_uids == 5000
+    assert config.daily_summary.enabled is False
+    assert config.daily_summary.summary_sender == ""
+    assert config.daily_summary.summary_recipients == ()
+    assert config.daily_summary.summary_time == "06:00"
+    assert config.daily_summary.summary_interval_minutes == 1440
 
 
 def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
@@ -72,7 +84,14 @@ def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
                     "timeout_seconds": 12,
                     "max_body_chars": 2500,
                     "max_subject_chars": 200,
-                }
+                },
+                "daily_summary": {
+                    "enabled": True,
+                    "summary_sender": "gmail:main",
+                    "summary_recipients": "owner@example.test, backup@example.test",
+                    "summary_time": "6:05",
+                    "summary_interval_minutes": 15,
+                },
             }
         ),
         encoding="utf-8",
@@ -87,6 +106,14 @@ def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
     assert config.openai.timeout_seconds == 12
     assert config.openai.max_body_chars == 2500
     assert config.openai.max_subject_chars == 200
+    assert config.daily_summary.enabled is True
+    assert config.daily_summary.summary_sender == "gmail:MAIN"
+    assert config.daily_summary.summary_recipients == (
+        "owner@example.test",
+        "backup@example.test",
+    )
+    assert config.daily_summary.summary_time == "06:05"
+    assert config.daily_summary.summary_interval_minutes == 15
     assert config.max_tracked_uids == 1200
 
 
@@ -100,6 +127,27 @@ def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
         ({"openai": {"max_body_chars": 0}}, "openai.max_body_chars"),
         ({"openai": {"enabled": "yes"}}, "openai.enabled"),
         ({"openai": {"system_prompt": 42}}, "openai.system_prompt"),
+        ({"daily_summary": []}, "invalid daily_summary section"),
+        ({"daily_summary": {"enabled": "yes"}}, "daily_summary.enabled"),
+        (
+            {"daily_summary": {"enabled": True, "summary_recipients": "owner@example.test"}},
+            "daily_summary.summary_sender",
+        ),
+        (
+            {"daily_summary": {"enabled": True, "summary_sender": "gmail:MAIN"}},
+            "daily_summary.summary_recipients",
+        ),
+        ({"daily_summary": {"summary_sender": "main"}}, "daily_summary.summary_sender"),
+        ({"daily_summary": {"summary_time": "25:00"}}, "daily_summary.summary_time"),
+        (
+            {"daily_summary": {"summary_interval_minutes": 0}},
+            "daily_summary.summary_interval_minutes",
+        ),
+        (
+            {"daily_summary": {"summary_interval_minutes": "15"}},
+            "daily_summary.summary_interval_minutes",
+        ),
+        ({"daily_summary": {"summary_recipients": "not-an-email"}}, "summary_recipients"),
         ({"max_tracked_uids": 0}, "max_tracked_uids"),
         ({"max_tracked_uids": "1000"}, "max_tracked_uids"),
     ],
