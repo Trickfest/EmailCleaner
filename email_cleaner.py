@@ -2507,16 +2507,18 @@ def is_daily_summary_due(
     if now_minutes < summary_time_minutes(daily_summary_config.summary_time):
         return False
 
+    current_local_date = now.date().isoformat()
+    last_sent_local_date = daily_summary_state.get("last_sent_local_date", "")
+    if last_sent_local_date == current_local_date:
+        return False
+
     last_sent_at = parse_state_datetime(daily_summary_state.get("last_sent_at"))
     if last_sent_at is not None:
-        next_due_at = last_sent_at + timedelta(
-            minutes=daily_summary_config.summary_interval_minutes
-        )
-        return now >= next_due_at
-
-    last_sent_local_date = daily_summary_state.get("last_sent_local_date", "")
-    if last_sent_local_date == now.date().isoformat():
-        return False
+        comparison_tz = now.tzinfo
+        if comparison_tz is not None and last_sent_at.tzinfo is not None:
+            last_sent_at = last_sent_at.astimezone(comparison_tz)
+        if last_sent_at.date().isoformat() == current_local_date:
+            return False
 
     return True
 

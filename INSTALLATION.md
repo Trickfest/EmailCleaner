@@ -69,14 +69,14 @@ Summary email settings live in `config.json`:
   format.
 - `daily_summary.summary_recipients`: comma-separated recipient list.
 - `daily_summary.summary_time`: local `HH:MM` time when the first eligible run
-  may send the summary.
-- `daily_summary.summary_interval_minutes`: minimum minutes between summaries
-  and the report lookback window.
+  may send the summary, at most once per local day.
+- `daily_summary.summary_interval_minutes`: report lookback window and summary
+  run-record retention window.
 
 The LaunchDaemon schedule does not need a separate summary job. EmailCleaner
-sends the summary on the first scheduled run at or after `summary_time` once the
-configured interval has elapsed. For testing, set `summary_time` to `00:00` and
-`summary_interval_minutes` to `15`.
+sends the summary on the first scheduled run at or after `summary_time` if it
+has not already sent a summary for that local date. For testing summary content,
+set `summary_time` to `00:00` and `summary_interval_minutes` to `15`.
 
 Summary send attempts are logged in the same stdout/stderr files as scanner
 runs. A successful send prints `Daily summary email sent...`; SMTP or

@@ -136,10 +136,13 @@ Summary email settings:
 - `daily_summary.summary_recipients` is a comma-separated list of recipient
   email addresses.
 - `daily_summary.summary_time` is local `HH:MM` time. EmailCleaner sends on the
-  first eligible scheduled run at or after that time.
-- `daily_summary.summary_interval_minutes` controls both the minimum time
-  between summary sends and the report lookback window. The default is `1440`
-  minutes. For testing, use a shorter value such as `15`.
+  first eligible scheduled run at or after that time, at most once per local
+  day.
+- `daily_summary.summary_interval_minutes` controls the report lookback window
+  and summary run-record retention. It does not delay the next local day's
+  summary if a previous summary was sent later in the day. The default is
+  `1440` minutes. For testing summary content, use a shorter value such as
+  `15`.
 - Summaries contain aggregate totals only: processed/quarantined counts,
   quarantine/OpenAI/cleanup counts, and errors. They do not include message
   sender, subject, or body details.

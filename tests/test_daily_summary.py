@@ -71,6 +71,7 @@ def test_daily_summary_due_on_first_run_after_configured_time() -> None:
     after_time = datetime(2026, 5, 17, 6, 1, tzinfo=timezone.utc)
     before_interval = datetime(2026, 5, 17, 6, 14, tzinfo=timezone.utc)
     after_interval = datetime(2026, 5, 17, 6, 16, tzinfo=timezone.utc)
+    next_day_after_time = datetime(2026, 5, 18, 6, 0, tzinfo=timezone.utc)
 
     assert app.is_daily_summary_due(config, state, before_time) is False
     assert app.is_daily_summary_due(config, state, after_time) is True
@@ -78,7 +79,53 @@ def test_daily_summary_due_on_first_run_after_configured_time() -> None:
     state["last_sent_at"] = after_time.isoformat()
     state["last_sent_local_date"] = after_time.date().isoformat()
     assert app.is_daily_summary_due(config, state, before_interval) is False
-    assert app.is_daily_summary_due(config, state, after_interval) is True
+    assert app.is_daily_summary_due(config, state, after_interval) is False
+    assert app.is_daily_summary_due(config, state, next_day_after_time) is True
+
+
+def test_daily_summary_due_uses_local_day_not_rolling_interval() -> None:
+    eastern = timezone(timedelta(hours=-4))
+    config = app.DailySummaryConfig(
+        enabled=True,
+        summary_sender="gmail:MAIN",
+        summary_recipients=("owner@example.test",),
+        summary_time="06:00",
+        summary_interval_minutes=1440,
+    )
+    state = app.empty_daily_summary_state()
+    state["last_sent_at"] = datetime(2026, 5, 17, 19, 15, tzinfo=eastern).isoformat()
+    state["last_sent_local_date"] = "2026-05-17"
+
+    assert (
+        app.is_daily_summary_due(
+            config,
+            state,
+            datetime(2026, 5, 18, 6, 0, tzinfo=eastern),
+        )
+        is True
+    )
+
+
+def test_daily_summary_due_uses_last_sent_at_when_date_state_missing() -> None:
+    config = app.DailySummaryConfig(
+        enabled=True,
+        summary_sender="gmail:MAIN",
+        summary_recipients=("owner@example.test",),
+        summary_time="06:00",
+        summary_interval_minutes=15,
+    )
+    state = app.empty_daily_summary_state()
+    state["last_sent_local_date"] = ""
+    state["last_sent_at"] = datetime(2026, 5, 17, 6, 1, tzinfo=timezone.utc).isoformat()
+
+    assert (
+        app.is_daily_summary_due(
+            config,
+            state,
+            datetime(2026, 5, 17, 6, 16, tzinfo=timezone.utc),
+        )
+        is False
+    )
 
 
 def test_daily_summary_due_honors_legacy_date_state() -> None:
