@@ -77,6 +77,8 @@ The LaunchDaemon schedule does not need a separate summary job. EmailCleaner
 sends the summary on the first scheduled run at or after `summary_time` if it
 has not already sent a summary for that local date. For testing summary content,
 set `summary_time` to `00:00` and `summary_interval_minutes` to `15`.
+Summary emails include aggregate OpenAI evaluated, delete-candidate, and failure
+counts for the report window.
 
 Summary send attempts are logged in the same stdout/stderr files as scanner
 runs. A successful send prints `Daily summary email sent...`; SMTP or

@@ -144,8 +144,8 @@ Summary email settings:
   `1440` minutes. For testing summary content, use a shorter value such as
   `15`.
 - Summaries contain aggregate totals only: processed/quarantined counts,
-  quarantine/OpenAI/cleanup counts, and errors. They do not include message
-  sender, subject, or body details.
+  quarantine/OpenAI/cleanup counts, OpenAI failure counts, and errors. They do
+  not include message sender, subject, or body details.
 - Summary emails are skipped in `--dry-run` mode because dry runs do not write
   state or perform mailbox/email side effects.
 
@@ -164,6 +164,7 @@ Totals:
   Quarantine failures: 0
   OpenAI evaluated: 18
   OpenAI delete candidates: 5
+  OpenAI failures: 3
   Quarantine cleanup deleted: 3
   Quarantine cleanup failures: 0
 
@@ -175,6 +176,7 @@ Per account:
     Quarantine failures: 0
     OpenAI evaluated: 12
     OpenAI delete candidates: 3
+    OpenAI failures: 1
     Quarantine cleanup deleted: 2
     Quarantine cleanup failures: 0
   yahoo:ARCHIVE (archive@example.test)
@@ -184,6 +186,7 @@ Per account:
     Quarantine failures: 0
     OpenAI evaluated: 6
     OpenAI delete candidates: 2
+    OpenAI failures: 2
     Quarantine cleanup deleted: 1
     Quarantine cleanup failures: 0
 
@@ -199,7 +202,8 @@ OpenAI fallback settings:
 - `openai.system_prompt` is configurable in `config.json`.
 - Only `decision=delete_candidate` with `confidence >= openai.confidence_threshold`
   marks a message as a delete candidate.
-- API, network, or response-parse errors fail safe: the message is kept.
+- API, network, or response-parse errors fail safe: the message is kept, and
+  aggregate OpenAI failure counts are included in summary emails.
 - EmailCleaner sends only configured subject/body excerpts and required
   metadata to OpenAI.
 

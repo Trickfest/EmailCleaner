@@ -167,6 +167,9 @@ def test_build_daily_summary_account_stats_counts_aggregate_actions() -> None:
     llm_delete.llm_evaluated = True
     llm_delete.llm_decision = "delete_candidate"
     llm_delete.action = "QUARANTINED"
+    llm_error = make_summary()
+    llm_error.llm_evaluated = True
+    llm_error.llm_decision = "error"
     cleanup_result = app.QuarantineCleanupResult(
         status="OK",
         configured_days=30,
@@ -180,16 +183,17 @@ def test_build_daily_summary_account_stats_counts_aggregate_actions() -> None:
 
     stats = app.build_daily_summary_account_stats(
         account=make_account(),
-        messages=[quarantined, llm_delete],
+        messages=[quarantined, llm_delete, llm_error],
         scanned_folder_count=3,
         cleanup_result=cleanup_result,
     )
 
-    assert stats.messages_processed == 2
+    assert stats.messages_processed == 3
     assert stats.delete_candidates == 2
     assert stats.quarantined == 2
-    assert stats.llm_evaluated == 1
+    assert stats.llm_evaluated == 2
     assert stats.llm_delete_candidates == 1
+    assert stats.llm_failures == 1
     assert stats.cleanup_deleted == 2
 
 
@@ -234,6 +238,7 @@ def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
                     quarantine_failures=0,
                     llm_evaluated=12,
                     llm_delete_candidates=3,
+                    llm_failures=1,
                     cleanup_deleted=2,
                     cleanup_failures=0,
                     errors=(),
@@ -249,6 +254,7 @@ def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
                     quarantine_failures=0,
                     llm_evaluated=6,
                     llm_delete_candidates=2,
+                    llm_failures=2,
                     cleanup_deleted=1,
                     cleanup_failures=0,
                     errors=("folder scan failed: SELECT_FAILED",),
@@ -279,6 +285,7 @@ def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
         "  Quarantine failures: 0\n"
         "  OpenAI evaluated: 18\n"
         "  OpenAI delete candidates: 5\n"
+        "  OpenAI failures: 3\n"
         "  Quarantine cleanup deleted: 3\n"
         "  Quarantine cleanup failures: 0\n"
         "\n"
@@ -290,6 +297,7 @@ def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
         "    Quarantine failures: 0\n"
         "    OpenAI evaluated: 12\n"
         "    OpenAI delete candidates: 3\n"
+        "    OpenAI failures: 1\n"
         "    Quarantine cleanup deleted: 2\n"
         "    Quarantine cleanup failures: 0\n"
         "  yahoo:ARCHIVE (archive@example.test)\n"
@@ -299,6 +307,7 @@ def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
         "    Quarantine failures: 0\n"
         "    OpenAI evaluated: 6\n"
         "    OpenAI delete candidates: 2\n"
+        "    OpenAI failures: 2\n"
         "    Quarantine cleanup deleted: 1\n"
         "    Quarantine cleanup failures: 0\n"
         "\n"

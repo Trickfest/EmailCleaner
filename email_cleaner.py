@@ -253,6 +253,7 @@ class DailySummaryAccountStats:
     quarantine_failures: int
     llm_evaluated: int
     llm_delete_candidates: int
+    llm_failures: int
     cleanup_deleted: int
     cleanup_failures: int
     errors: tuple[str, ...]
@@ -2421,6 +2422,11 @@ def build_daily_summary_account_stats(
             for message in messages
             if message.llm_decision == "delete_candidate" and message.delete_candidate
         ),
+        llm_failures=sum(
+            1
+            for message in messages
+            if message.llm_evaluated and message.llm_decision == "error"
+        ),
         cleanup_deleted=cleanup_result.deleted_count,
         cleanup_failures=cleanup_failure_count,
         errors=combined_errors,
@@ -2442,6 +2448,7 @@ def build_empty_daily_summary_account_stats(
         quarantine_failures=0,
         llm_evaluated=0,
         llm_delete_candidates=0,
+        llm_failures=0,
         cleanup_deleted=0,
         cleanup_failures=0,
         errors=tuple(errors),
@@ -2541,6 +2548,7 @@ def empty_account_totals(account: AccountCredentials) -> dict[str, object]:
         "quarantine_failures": 0,
         "llm_evaluated": 0,
         "llm_delete_candidates": 0,
+        "llm_failures": 0,
         "cleanup_deleted": 0,
         "cleanup_failures": 0,
         "errors": [],
@@ -2564,6 +2572,7 @@ def aggregate_daily_summary(
         "quarantine_failures": 0,
         "llm_evaluated": 0,
         "llm_delete_candidates": 0,
+        "llm_failures": 0,
         "cleanup_deleted": 0,
         "cleanup_failures": 0,
     }
@@ -2605,6 +2614,7 @@ def aggregate_daily_summary(
                     "quarantine_failures": 0,
                     "llm_evaluated": 0,
                     "llm_delete_candidates": 0,
+                    "llm_failures": 0,
                     "cleanup_deleted": 0,
                     "cleanup_failures": 0,
                     "errors": [],
@@ -2659,6 +2669,7 @@ def format_daily_summary_body(
         f"  Quarantine failures: {totals['quarantine_failures']}",
         f"  OpenAI evaluated: {totals['llm_evaluated']}",
         f"  OpenAI delete candidates: {totals['llm_delete_candidates']}",
+        f"  OpenAI failures: {totals['llm_failures']}",
         f"  Quarantine cleanup deleted: {totals['cleanup_deleted']}",
         f"  Quarantine cleanup failures: {totals['cleanup_failures']}",
         "",
@@ -2678,6 +2689,7 @@ def format_daily_summary_body(
                 f"    Quarantine failures: {account['quarantine_failures']}",
                 f"    OpenAI evaluated: {account['llm_evaluated']}",
                 f"    OpenAI delete candidates: {account['llm_delete_candidates']}",
+                f"    OpenAI failures: {account['llm_failures']}",
                 f"    Quarantine cleanup deleted: {account['cleanup_deleted']}",
                 f"    Quarantine cleanup failures: {account['cleanup_failures']}",
             ]
