@@ -1,7 +1,7 @@
 # EmailCleaner macOS LaunchDaemon Setup
 
 This guide covers runtime configuration, two installation paths, day-to-day
-operations, log rotation, and uninstall steps:
+operations, status checks, log rotation, and uninstall steps:
 
 1. Runtime configuration files and summary-email settings
 2. One-shot install with `scripts/install_launchdaemon.sh`
@@ -15,7 +15,7 @@ Use this if you want EmailCleaner to run automatically as a system background ta
 
 - Code installed to `/usr/local/libexec/EmailCleaner`
 - Runtime config and state in `/Library/Application Support/EmailCleaner`
-- OpenAI env file in `/Library/Application Support/EmailCleaner/openai.env` (mode `600`)
+- Optional OpenAI env file in `/Library/Application Support/EmailCleaner/openai.env` (mode `600`)
 - Logs in `/Library/Logs/email-cleaner.out.log` and `/Library/Logs/email-cleaner.err.log`
 - LaunchDaemon plist in `/Library/LaunchDaemons/com.emailcleaner.daemon.plist`
 
@@ -35,7 +35,8 @@ does not depend on a custom log subdirectory existing after boot or update.
 2. Repo cloned locally.
 3. Xcode or Apple Command Line Tools installed so `/usr/bin/python3` is available.
 4. `/usr/bin/python3 -m venv` works on the target Mac.
-5. `OPENAI_API_KEY` is exported in your current shell before you run install commands.
+5. If OpenAI fallback is enabled in `config.json`, `OPENAI_API_KEY` is exported
+   in your current shell before you run install commands.
 6. For an initial install, you have runtime files in repo root:
    - `rules.json`
    - `config.json`
@@ -83,19 +84,24 @@ configuration failures are written to stderr and cause a non-zero run exit.
 
 ## Option A: One-Shot Installer Script
 
-From repo root (installer fails fast if `OPENAI_API_KEY` is missing):
+From repo root:
 
 ```bash
 cd /path/to/repo
-export OPENAI_API_KEY="your_openai_api_key_here"
 ./scripts/install_launchdaemon.sh --interval 15
+```
+
+If `openai.enabled=true` in `config.json`, export the API key before running the
+installer:
+
+```bash
+export OPENAI_API_KEY="your_openai_api_key_here"
 ```
 
 For 30-minute interval:
 
 ```bash
 cd /path/to/repo
-export OPENAI_API_KEY="your_openai_api_key_here"
 ./scripts/install_launchdaemon.sh --interval 30
 ```
 
@@ -109,7 +115,6 @@ Use overwrite flags only for the file(s) you want to replace:
 
 ```bash
 cd /path/to/repo
-export OPENAI_API_KEY="your_openai_api_key_here"
 ./scripts/install_launchdaemon.sh \
   --interval 15 \
   --overwrite-rules \
@@ -130,7 +135,6 @@ Optional custom daemon label:
 ```bash
 cd /path/to/repo
 # Default label if omitted: com.emailcleaner.daemon
-export OPENAI_API_KEY="your_openai_api_key_here"
 EC_LABEL="com.example.emailcleaner" ./scripts/install_launchdaemon.sh --interval 15
 ```
 
@@ -138,7 +142,6 @@ Equivalent explicit flag form:
 
 ```bash
 cd /path/to/repo
-export OPENAI_API_KEY="your_openai_api_key_here"
 ./scripts/install_launchdaemon.sh --interval 15 --label com.example.emailcleaner
 ```
 
@@ -146,7 +149,6 @@ Override graceful and hard-timeout behavior:
 
 ```bash
 cd /path/to/repo
-export OPENAI_API_KEY="your_openai_api_key_here"
 ./scripts/install_launchdaemon.sh \
   --interval 15 \
   --max-runtime-seconds 3600 \
@@ -175,7 +177,6 @@ export EC_INTERVAL_MINUTES="15"   # allowed: 15 or 30
 export EC_MAX_RUNTIME_SECONDS="3600"  # graceful wall-clock cap in seconds
 export EC_WATCHDOG_GRACE_SECONDS="15" # SIGTERM grace before SIGKILL
 export EC_WATCHDOG_TIMEOUT_SECONDS="$((EC_MAX_RUNTIME_SECONDS + EC_WATCHDOG_GRACE_SECONDS))"
-export OPENAI_API_KEY="your_openai_api_key_here"
 export RUN_USER="$(id -un)"
 export RUN_GROUP="$(id -gn "$RUN_USER")"
 
@@ -325,14 +326,14 @@ if [ ! -f "${EC_SUPPORT_DIR}/.email_cleaner_state.json" ]; then
 fi
 ```
 
-Create OpenAI env file (required by launcher wrapper):
+Create optional OpenAI env file. If OpenAI fallback is disabled, this can contain
+an empty value; if OpenAI fallback is enabled, set `OPENAI_API_KEY` first:
 
 ```bash
-[ -n "${OPENAI_API_KEY:-}" ] || { echo "OPENAI_API_KEY is not set"; exit 1; }
 TMP_OPENAI_ENV="$(mktemp)"
 {
   echo "# Managed for EmailCleaner LaunchDaemon runtime"
-  printf 'export OPENAI_API_KEY=%q\n' "$OPENAI_API_KEY"
+  printf 'export OPENAI_API_KEY=%q\n' "${OPENAI_API_KEY:-}"
 } > "$TMP_OPENAI_ENV"
 sudo install -o "$RUN_USER" -g "$RUN_GROUP" -m 600 "$TMP_OPENAI_ENV" "$EC_OPENAI_ENV_FILE"
 rm -f "$TMP_OPENAI_ENV"
@@ -349,16 +350,9 @@ cat >"$TMP_LAUNCHER" <<LAUNCHER
 set -euo pipefail
 
 ENV_FILE="${EC_OPENAI_ENV_FILE}"
-if [[ ! -f "\$ENV_FILE" ]]; then
-  echo "[launcher] missing env file: \$ENV_FILE" >&2
-  exit 1
-fi
-
-# shellcheck disable=SC1090
-source "\$ENV_FILE"
-if [[ -z "\${OPENAI_API_KEY:-}" ]]; then
-  echo "[launcher] OPENAI_API_KEY is missing in \$ENV_FILE" >&2
-  exit 1
+if [[ -f "\$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "\$ENV_FILE"
 fi
 
 exec "${EC_VENV_PYTHON}" -u "${EC_WATCHDOG_SCRIPT}" \
@@ -468,7 +462,13 @@ sudo launchctl kickstart -k "system/${EC_LABEL}"
 sudo launchctl print "system/${EC_LABEL}"
 tail -n 100 "${EC_LOG_OUT_PATH}"
 tail -n 100 "${EC_LOG_ERR_PATH}"
-sudo test -s "${EC_OPENAI_ENV_FILE}" && echo "openai env file present"
+```
+
+The status helper combines those checks and prints recent logs:
+
+```bash
+cd /path/to/repo
+./scripts/status_launchdaemon.sh --label "$EC_LABEL"
 ```
 
 Summary email send attempts are logged in the same stdout/stderr files. SMTP or
@@ -532,6 +532,20 @@ cd /path/to/repo
 ./scripts/reset_launchdaemon_logs.sh --label com.example.emailcleaner
 ```
 
+Check installed status and recent logs:
+
+```bash
+cd /path/to/repo
+./scripts/status_launchdaemon.sh
+```
+
+For a custom label or shorter log tail:
+
+```bash
+cd /path/to/repo
+./scripts/status_launchdaemon.sh --label com.example.emailcleaner --lines 40
+```
+
 ## Updating After Repo Changes
 
 Simplest path:
@@ -546,7 +560,6 @@ overwrite flags for the files you intentionally want to replace:
 
 ```bash
 cd /path/to/repo
-export OPENAI_API_KEY="your_openai_api_key_here"
 ./scripts/install_launchdaemon.sh \
   --interval 15 \
   --overwrite-config
@@ -635,7 +648,7 @@ test ! -e "$EC_LOG_OUT_PATH" && test ! -e "$EC_LOG_ERR_PATH" && echo "logs remov
 ## Security Notes
 
 1. `accounts.json` contains app passwords; keep permissions restrictive.
-2. `openai.env` contains `OPENAI_API_KEY`; keep it mode `600` and owned by the run user.
+2. `openai.env` contains `OPENAI_API_KEY` when OpenAI fallback is enabled; keep it mode `600` and owned by the run user.
 3. Runtime files in `/Library/Application Support/EmailCleaner` should stay mode `600` and owned by the run user.
 4. Keep FileVault enabled for at-rest encryption.
 5. Keep your daemon label consistent across install, operations, and uninstall.

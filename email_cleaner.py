@@ -2580,7 +2580,7 @@ def aggregate_daily_summary(
         record_time_text = record_time.isoformat(timespec="seconds")
 
         raw_record_errors = record.get("errors", [])
-        if isinstance(raw_record_errors, list):
+        if isinstance(raw_record_errors, (list, tuple)):
             for error in raw_record_errors:
                 if isinstance(error, str) and error.strip():
                     errors.append(f"{record_time_text}: {error.strip()}")
@@ -2615,7 +2615,7 @@ def aggregate_daily_summary(
 
             account_errors = account_total["errors"]
             raw_account_errors = raw_account_stats.get("errors", [])
-            if isinstance(account_errors, list) and isinstance(raw_account_errors, list):
+            if isinstance(account_errors, list) and isinstance(raw_account_errors, (list, tuple)):
                 for error in raw_account_errors:
                     if isinstance(error, str) and error.strip():
                         error_text = f"{state_key}: {error.strip()}"

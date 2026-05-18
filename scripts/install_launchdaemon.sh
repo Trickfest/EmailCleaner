@@ -32,7 +32,7 @@ Options:
 
 Notes:
   - Run this script as your normal user (not root). It will use sudo as needed.
-  - OPENAI_API_KEY must be set in your current shell before running this script.
+  - Set OPENAI_API_KEY in your current shell only when OpenAI fallback is enabled.
   - Initial install expects local runtime files in the repo root:
       rules.json, config.json, accounts.json
   - On reinstall, installed runtime files are preserved by default unless you
@@ -126,7 +126,6 @@ esac
 (( WATCHDOG_GRACE_SECONDS >= 1 )) || fail "--watchdog-grace-seconds must be >= 1."
 
 OPENAI_API_KEY_VALUE="${OPENAI_API_KEY:-}"
-[[ -n "$OPENAI_API_KEY_VALUE" ]] || fail "OPENAI_API_KEY must be set before running this script."
 if [[ "$OPENAI_API_KEY_VALUE" == *$'\n'* || "$OPENAI_API_KEY_VALUE" == *$'\r'* ]]; then
   fail "OPENAI_API_KEY must be a single-line value."
 fi
@@ -253,16 +252,9 @@ write_launcher_script() {
 set -euo pipefail
 
 ENV_FILE="${OPENAI_ENV_PATH}"
-if [[ ! -f "\$ENV_FILE" ]]; then
-  echo "[launcher] missing env file: \$ENV_FILE" >&2
-  exit 1
-fi
-
-# shellcheck disable=SC1090
-source "\$ENV_FILE"
-if [[ -z "\${OPENAI_API_KEY:-}" ]]; then
-  echo "[launcher] OPENAI_API_KEY is missing in \$ENV_FILE" >&2
-  exit 1
+if [[ -f "\$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "\$ENV_FILE"
 fi
 
 exec "${VENV_PYTHON}" -u "${WATCHDOG_SCRIPT}" \
@@ -343,6 +335,9 @@ if [[ ! -f "${APP_SUPPORT_DIR}/.email_cleaner_state.json" ]]; then
 fi
 
 info "Writing OpenAI runtime environment file to ${OPENAI_ENV_PATH}."
+if [[ -z "$OPENAI_API_KEY_VALUE" ]]; then
+  info "OPENAI_API_KEY is not set; OpenAI fallback will remain disabled unless config and environment are updated."
+fi
 write_openai_env_file "$OPENAI_ENV_PATH"
 
 info "Writing daemon launcher script to ${LAUNCHER_SCRIPT}."
@@ -454,5 +449,5 @@ echo "  3) Check stderr log:"
 echo "     tail -n 100 \"${LOG_ERR_PATH}\""
 echo "  4) Trigger an immediate run:"
 echo "     sudo launchctl kickstart -k system/${LABEL}"
-echo "  5) Confirm OpenAI env file exists:"
-echo "     sudo test -s \"${OPENAI_ENV_PATH}\" && echo \"openai env file present\""
+echo "  5) Run the bundled status helper:"
+echo "     ${INSTALL_DIR}/scripts/status_launchdaemon.sh --label ${LABEL}"

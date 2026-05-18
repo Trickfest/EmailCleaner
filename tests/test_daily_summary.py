@@ -26,6 +26,15 @@ def make_account() -> app.AccountCredentials:
     )
 
 
+def make_archive_account() -> app.AccountCredentials:
+    return app.AccountCredentials(
+        provider="yahoo",
+        account_key="ARCHIVE",
+        email="archive@example.test",
+        app_password="app-password",
+    )
+
+
 def test_resolve_daily_summary_sender_account_requires_configured_account() -> None:
     account = make_account()
     config = app.DailySummaryConfig(
@@ -151,6 +160,104 @@ def test_format_daily_summary_body_includes_zero_report_for_all_accounts() -> No
     assert "Quarantined: 0" in body
     assert "gmail:MAIN (main@example.test)" in body
     assert "Errors:\n  None" in body
+
+
+def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
+    main_account = make_account()
+    archive_account = make_archive_account()
+    state = app.empty_daily_summary_state()
+    run_started = datetime(2026, 5, 17, 5, 30, tzinfo=timezone.utc)
+    run_ended = datetime(2026, 5, 17, 5, 45, tzinfo=timezone.utc)
+    app.append_daily_summary_run_record(
+        state,
+        app.DailySummaryRunRecord(
+            started_at=run_started.isoformat(timespec="seconds"),
+            ended_at=run_ended.isoformat(timespec="seconds"),
+            status="success",
+            exit_code=0,
+            accounts={
+                "gmail:MAIN": app.DailySummaryAccountStats(
+                    provider="gmail",
+                    account_key="MAIN",
+                    email="main@example.test",
+                    scanned_folders=3,
+                    messages_processed=31,
+                    delete_candidates=8,
+                    quarantined=8,
+                    quarantine_failures=0,
+                    llm_evaluated=12,
+                    llm_delete_candidates=3,
+                    cleanup_deleted=2,
+                    cleanup_failures=0,
+                    errors=(),
+                ),
+                "yahoo:ARCHIVE": app.DailySummaryAccountStats(
+                    provider="yahoo",
+                    account_key="ARCHIVE",
+                    email="archive@example.test",
+                    scanned_folders=2,
+                    messages_processed=16,
+                    delete_candidates=4,
+                    quarantined=4,
+                    quarantine_failures=0,
+                    llm_evaluated=6,
+                    llm_delete_candidates=2,
+                    cleanup_deleted=1,
+                    cleanup_failures=0,
+                    errors=("folder scan failed: SELECT_FAILED",),
+                ),
+            },
+            errors=(),
+        ),
+        now=run_ended,
+    )
+
+    body = app.format_daily_summary_body(
+        daily_summary_state=state,
+        accounts=[main_account, archive_account],
+        window_start=datetime(2026, 5, 16, 6, 0, tzinfo=timezone.utc),
+        window_end=datetime(2026, 5, 17, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert body == (
+        "EmailCleaner summary\n"
+        "Window: 2026-05-16T06:00:00+00:00 to 2026-05-17T06:00:00+00:00\n"
+        "Runs included: 1\n"
+        "Status: errors detected\n"
+        "\n"
+        "Totals:\n"
+        "  Messages processed: 47\n"
+        "  Delete candidates: 12\n"
+        "  Quarantined: 12\n"
+        "  Quarantine failures: 0\n"
+        "  OpenAI evaluated: 18\n"
+        "  OpenAI delete candidates: 5\n"
+        "  Quarantine cleanup deleted: 3\n"
+        "  Quarantine cleanup failures: 0\n"
+        "\n"
+        "Per account:\n"
+        "  gmail:MAIN (main@example.test)\n"
+        "    Messages processed: 31\n"
+        "    Delete candidates: 8\n"
+        "    Quarantined: 8\n"
+        "    Quarantine failures: 0\n"
+        "    OpenAI evaluated: 12\n"
+        "    OpenAI delete candidates: 3\n"
+        "    Quarantine cleanup deleted: 2\n"
+        "    Quarantine cleanup failures: 0\n"
+        "  yahoo:ARCHIVE (archive@example.test)\n"
+        "    Messages processed: 16\n"
+        "    Delete candidates: 4\n"
+        "    Quarantined: 4\n"
+        "    Quarantine failures: 0\n"
+        "    OpenAI evaluated: 6\n"
+        "    OpenAI delete candidates: 2\n"
+        "    Quarantine cleanup deleted: 1\n"
+        "    Quarantine cleanup failures: 0\n"
+        "\n"
+        "Errors:\n"
+        "  - 2026-05-17T05:45:00+00:00: yahoo:ARCHIVE: folder scan failed: SELECT_FAILED\n"
+    )
 
 
 def test_send_daily_summary_email_uses_configured_sender(monkeypatch: pytest.MonkeyPatch) -> None:

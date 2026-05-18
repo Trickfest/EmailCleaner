@@ -85,6 +85,17 @@ Before finalizing changes:
 - Prefer safe validation paths (`--dry-run`, temp state files) over live mailbox mutation.
 - When changing daemon/runtime behavior, keep `INSTALLATION.md` and generated launcher behavior aligned with the installed runtime.
 - Production `rules.json`, `config.json`, and `accounts.json` may be mirrored into the repo for local reference, but must remain untracked and uncommitted.
+- Tests must not depend on local untracked runtime files such as `config.json`,
+  `rules.json`, `accounts.json`, or `.email_cleaner_state.json`; use temp paths
+  or explicit fixtures when testing `main()`.
+- When docs include example runtime output, especially email bodies or CLI output,
+  keep the example aligned with the actual formatter and add or update a focused
+  test when practical.
+- Installer and daemon script tests should avoid sudo/live launchd mutation; use
+  `--help`, syntax checks, temp repo copies, and early-failure paths where possible.
+- Optional integrations must remain optional in install/runtime scripts. For
+  example, OpenAI setup should only require `OPENAI_API_KEY` when OpenAI fallback
+  is enabled.
 
 Anti-regression checklist:
 - Deterministic rule precedence is unchanged (`never_filter` before any delete path; OpenAI last).

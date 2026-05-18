@@ -146,6 +146,48 @@ Summary email settings:
 - Summary emails are skipped in `--dry-run` mode because dry runs do not write
   state or perform mailbox/email side effects.
 
+Example summary body:
+
+```text
+EmailCleaner summary
+Window: 2026-05-16T06:00:00-04:00 to 2026-05-17T06:00:00-04:00
+Runs included: 96
+Status: errors detected
+
+Totals:
+  Messages processed: 47
+  Delete candidates: 12
+  Quarantined: 12
+  Quarantine failures: 0
+  OpenAI evaluated: 18
+  OpenAI delete candidates: 5
+  Quarantine cleanup deleted: 3
+  Quarantine cleanup failures: 0
+
+Per account:
+  gmail:MAIN (main@example.test)
+    Messages processed: 31
+    Delete candidates: 8
+    Quarantined: 8
+    Quarantine failures: 0
+    OpenAI evaluated: 12
+    OpenAI delete candidates: 3
+    Quarantine cleanup deleted: 2
+    Quarantine cleanup failures: 0
+  yahoo:ARCHIVE (archive@example.test)
+    Messages processed: 16
+    Delete candidates: 4
+    Quarantined: 4
+    Quarantine failures: 0
+    OpenAI evaluated: 6
+    OpenAI delete candidates: 2
+    Quarantine cleanup deleted: 1
+    Quarantine cleanup failures: 0
+
+Errors:
+  - yahoo:ARCHIVE: folder scan failed: SELECT_FAILED
+```
+
 OpenAI fallback settings:
 
 - OpenAI fallback runs only after deterministic rules do not match.

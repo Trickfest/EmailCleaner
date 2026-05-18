@@ -68,6 +68,10 @@ def test_main_returns_timeout_exit_code_and_writes_state(
         "argv",
         [
             "email_cleaner.py",
+            "--rules-file",
+            str(tmp_path / "missing-rules.json"),
+            "--config-file",
+            str(tmp_path / "missing-config.json"),
             "--state-file",
             str(state_path),
             "--max-runtime-seconds",
