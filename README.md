@@ -22,6 +22,9 @@ rules, and quarantine suspected spam or junk email.
 For macOS background installation with LaunchDaemon, see
 [`INSTALLATION.md`](INSTALLATION.md).
 
+For Azure deployment planning, see
+[`AZURE_DEPLOYMENT.md`](AZURE_DEPLOYMENT.md).
+
 ## Setup
 
 ### 1. Create App Passwords
