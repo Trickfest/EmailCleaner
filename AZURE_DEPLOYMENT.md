@@ -192,15 +192,33 @@ CMD ["--max-runtime-seconds", "3600", "--rules-file", "/data/rules.json", "--acc
 This repo currently has no runtime third-party dependencies, so no
 `requirements.txt` install is required for the container image.
 
+The generated Azure job YAML also sets these command arguments explicitly,
+using `AZURE_MAX_RUNTIME_SECONDS` from `scripts/azure/env.local` for the runtime
+cap. That keeps the cap configurable without changing the Dockerfile.
+
 Local Docker is not required for this deployment. The deployment flow should
 build the image in Azure with ACR Tasks and then validate the running container
 through a manual Azure Container Apps job execution.
 
 ## Deployment Scripts
 
-Add Azure scripts under `scripts/azure/`. The scripts should be idempotent where
-reasonable and should default to the production names above, while allowing
+Azure scripts live under `scripts/azure/`. The scripts are idempotent where
+reasonable and default to the production names above, while allowing
 environment-variable overrides.
+
+The implementation includes `scripts/azure/init-env.sh` to create a gitignored
+`scripts/azure/env.local` file. Run it once before using the Azure-mutating
+scripts:
+
+```bash
+scripts/azure/init-env.sh
+```
+
+That file stores stable nonsecret names, including the generated eight-digit
+suffix for `AZURE_ACR_NAME` and `AZURE_STORAGE_ACCOUNT`.
+Values exported in the current shell override values from `env.local`, which is
+useful for one-off testing changes such as a shorter runtime cap or a different
+trigger type.
 
 ### `scripts/azure/env.example`
 
@@ -217,9 +235,25 @@ export AZURE_FILE_SHARE="emailcleaner-data"
 export AZURE_LOG_WORKSPACE="law-emailcleaner-prod"
 export AZURE_IMAGE_NAME="emailcleaner"
 export AZURE_SCAN_CRON="*/15 * * * *"
+export AZURE_JOB_TRIGGER_TYPE="Manual"
+export AZURE_MAX_RUNTIME_SECONDS="3600"
+export AZURE_SECRET_ENV_VARS="OPENAI_API_KEY EMAIL_CLEANER_GMAIL_EMAIL_1 EMAIL_CLEANER_GMAIL_APP_PASSWORD_1 EMAIL_CLEANER_YAHOO_EMAIL_1 EMAIL_CLEANER_YAHOO_APP_PASSWORD_1"
 ```
 
 Do not put secrets in this file.
+
+### `scripts/azure/init-env.sh`
+
+Creates `scripts/azure/env.local` with stable generated names. If
+`AZURE_ACR_NAME` and `AZURE_STORAGE_ACCOUNT` are not already set, the script
+generates:
+
+```text
+AZURE_ACR_NAME=acremailcleaner<eight digits>
+AZURE_STORAGE_ACCOUNT=stemcleaner<eight digits>
+```
+
+The generated file contains no secrets and is ignored by git.
 
 ### `scripts/azure/provision.sh`
 
@@ -237,9 +271,8 @@ Creates or updates the base Azure resources:
 6. Create the Basic SKU ACR.
 7. Create the storage account and Azure Files share.
 8. Register the Azure Files share with the Container Apps environment.
-9. Configure managed identity and grant it `AcrPull` on the ACR.
-10. Upload initial `/data/config.json` and `/data/rules.json`.
-11. Create an empty `/data/.email_cleaner_state.json` if it does not exist.
+9. Upload initial `/data/config.json` and `/data/rules.json`.
+10. Create an empty `/data/.email_cleaner_state.json` if it does not exist.
 
 Use `az acr build` for cloud image builds so Docker does not need to be running
 locally:
@@ -262,20 +295,35 @@ Builds the current repo and updates the job image:
 4. Set CPU/memory, timeout, retry, cron, volume mount, and secret-backed env
    vars.
 5. Configure ACR pull through managed identity, not registry passwords.
-6. Start one manual execution after deployment unless `--no-run` is passed.
+6. Grant the job's system-assigned managed identity `AcrPull` on the ACR.
+7. Start one manual execution after deployment unless `--no-run` is passed.
 
-The job configuration should use:
+The steady-state scheduled job configuration should use:
 
 ```text
 trigger type: Schedule
 cron expression: */15 * * * *
 replica timeout: 3600
-replica retry limit: 0 or 1
+replica retry limit: 0
 parallelism: 1
 replica completion count: 1
 cpu: 0.25
 memory: 0.5Gi
 ```
+
+The default trigger is `Manual`, so first deployment can be verified with one
+controlled execution. Use `--trigger schedule` after the manual run has been
+checked.
+
+For local inspection without any Azure mutation:
+
+```bash
+scripts/azure/deploy.sh \
+  --render-yaml-only \
+  --image example.azurecr.io/emailcleaner:test
+```
+
+This safe render includes secret references but never includes secret values.
 
 ### `scripts/azure/sync-runtime-files.sh`
 
@@ -338,52 +386,107 @@ Log Analytics in the quickstart path.
 Deletes the resource group after confirmation. It must require an explicit
 confirmation argument because it deletes state and runtime files.
 
+### `scripts/azure/render-job-yaml.py`
+
+Internal helper used by `deploy.sh` to render the Container Apps job YAML. It
+can render a safe, secret-reference-only YAML for local inspection and a
+temporary deploy YAML with secret values read from the shell environment. The
+deploy script writes the secret-bearing YAML to a temporary mode-`600` file and
+removes it after use.
+
 ## Job YAML Shape
 
-The implementation should generate YAML rather than relying only on long CLI
-arguments, because Azure Files mounts are clearer and less brittle in YAML. The
-exact schema should be validated against the current Azure CLI extension, but
-the job needs these concepts:
+`deploy.sh` generates job YAML rather than relying only on long CLI arguments,
+because Azure Files mounts are clearer and less brittle in YAML.
 
-```yaml
-properties:
-  configuration:
-    triggerType: Schedule
-    replicaTimeout: 3600
-    replicaRetryLimit: 0
-    scheduleTriggerConfig:
-      cronExpression: "*/15 * * * *"
-      parallelism: 1
-      replicaCompletionCount: 1
-  template:
-    containers:
-      - name: emailcleaner
-        image: <acr-name>.azurecr.io/emailcleaner:<git-sha>
-        resources:
-          cpu: 0.25
-          memory: 0.5Gi
-        env:
-          - name: OPENAI_API_KEY
-            secretRef: openai-api-key
-          - name: EMAIL_CLEANER_GMAIL_EMAIL_1
-            secretRef: gmail-email-1
-          - name: EMAIL_CLEANER_GMAIL_APP_PASSWORD_1
-            secretRef: gmail-app-password-1
-          - name: EMAIL_CLEANER_YAHOO_EMAIL_1
-            secretRef: yahoo-email-1
-          - name: EMAIL_CLEANER_YAHOO_APP_PASSWORD_1
-            secretRef: yahoo-app-password-1
-        volumeMounts:
-          - volumeName: emailcleaner-data
-            mountPath: /data
-    volumes:
-      - name: emailcleaner-data
-        storageType: AzureFile
-        storageName: emailcleaner-data
+The safe local render path:
+
+```bash
+scripts/azure/deploy.sh \
+  --render-yaml-only \
+  --image example.azurecr.io/emailcleaner:test
 ```
 
-The script should create the Container Apps secrets before applying the job
-definition.
+prints reviewable YAML with secret references only. It does not call Azure and
+does not include secret values.
+
+During a real deployment, `deploy.sh` renders a temporary mode-`600` YAML file
+that includes `configuration.secrets` values read from the current shell
+environment. The temporary file is removed after `az containerapp job
+create/update` finishes. Secret values are not printed.
+
+The default render is manual-first:
+
+```yaml
+name: "caj-emailcleaner-prod"
+location: "centralus"
+type: "Microsoft.App/jobs"
+identity:
+  type: "SystemAssigned"
+properties:
+  environmentId: "/subscriptions/<subscription-id>/resourceGroups/rg-emailcleaner-prod/providers/Microsoft.App/managedEnvironments/cae-emailcleaner-prod"
+  configuration:
+    triggerType: "Manual"
+    replicaTimeout: 3600
+    replicaRetryLimit: 0
+    manualTriggerConfig:
+      parallelism: 1
+      replicaCompletionCount: 1
+    registries:
+      - server: "acremailcleaner12345678.azurecr.io"
+        identity: "system"
+  template:
+    containers:
+      - name: "emailcleaner"
+        image: "acremailcleaner12345678.azurecr.io/emailcleaner:<git-sha>"
+        args:
+          - "--max-runtime-seconds"
+          - "3600"
+          - "--rules-file"
+          - "/data/rules.json"
+          - "--accounts-file"
+          - "/data/accounts.json"
+          - "--config-file"
+          - "/data/config.json"
+          - "--state-file"
+          - "/data/.email_cleaner_state.json"
+        resources:
+          cpu: "0.25"
+          memory: "0.5Gi"
+        env:
+          - name: "OPENAI_API_KEY"
+            secretRef: "openai-api-key"
+          - name: "EMAIL_CLEANER_GMAIL_EMAIL_1"
+            secretRef: "email-cleaner-gmail-email-1"
+          - name: "EMAIL_CLEANER_GMAIL_APP_PASSWORD_1"
+            secretRef: "email-cleaner-gmail-app-password-1"
+          - name: "EMAIL_CLEANER_YAHOO_EMAIL_1"
+            secretRef: "email-cleaner-yahoo-email-1"
+          - name: "EMAIL_CLEANER_YAHOO_APP_PASSWORD_1"
+            secretRef: "email-cleaner-yahoo-app-password-1"
+        volumeMounts:
+          - volumeName: "emailcleaner-data"
+            mountPath: "/data"
+    volumes:
+      - name: "emailcleaner-data"
+        storageType: "AzureFile"
+        storageName: "emailcleaner-data"
+```
+
+Passing `--trigger schedule` changes the configuration to:
+
+```yaml
+configuration:
+  triggerType: "Schedule"
+  scheduleTriggerConfig:
+    cronExpression: "*/15 * * * *"
+    parallelism: 1
+    replicaCompletionCount: 1
+```
+
+The job uses a system-assigned managed identity for ACR pulls. After the job is
+created or updated, `deploy.sh` looks up the job identity principal and grants
+it `AcrPull` on the ACR if that role assignment is missing.
 
 ## Logging And Monitoring
 
@@ -440,22 +543,23 @@ interval.
 ### Phase 1: Define The Container Image
 
 1. Add `Dockerfile`.
-2. Run local Python validation:
+2. Add `scripts/azure/init-env.sh`, `env.example`, deployment scripts, and
+   `render-job-yaml.py`.
+3. Run local Python validation:
    ```bash
    python3 -m py_compile email_cleaner.py
    python3 -m pytest -q
    python3 email_cleaner.py --help
    ```
-3. Skip local image builds. The image will be built in Azure with ACR Tasks
+4. Skip local image builds. The image will be built in Azure with ACR Tasks
    during `scripts/azure/deploy.sh`.
 
 ### Phase 2: Provision Azure
 
-1. Add `scripts/azure/env.example`.
-2. Add `scripts/azure/provision.sh`.
+1. Run `scripts/azure/init-env.sh`.
+2. Run `scripts/azure/provision.sh`.
 3. Create the resource group and base resources.
 4. Upload initial runtime files to Azure Files.
-5. Set Container Apps secrets.
 
 ### Phase 3: Deploy Scheduled Job
 
@@ -464,6 +568,7 @@ interval.
 3. Apply the job YAML.
 4. Start a manual execution.
 5. Verify status and logs.
+6. Re-run `deploy.sh --trigger schedule --no-run` only after manual validation.
 
 ### Phase 4: Operations Scripts
 
@@ -506,15 +611,9 @@ would maintain separate state files and could process the same unread messages.
 
 ## Open Decisions
 
-These should be decided before implementation:
+These should be decided before a live Azure run:
 
-1. Azure region.
-2. Production resource group name.
-3. Whether to use ACR only, or an external registry to shave off the ACR cost.
-   ACR keeps the deployment fully inside the Azure resource group.
-4. Whether account credentials should be Container Apps secrets only, or stored
-   in `/data/accounts.json`.
-5. Whether to deploy first as manual-only, then switch to scheduled.
-6. Whether Azure should fully replace the Mac LaunchDaemon or run as a standby
+1. Whether to use the default production resource group name or choose a
+   different one before running `init-env.sh`.
+2. Whether Azure should fully replace the Mac LaunchDaemon or run as a standby
    during a short validation window.
-
