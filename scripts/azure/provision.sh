@@ -52,10 +52,10 @@ info "Checking Azure account."
 az account show --output table
 
 info "Registering required Azure providers."
-az provider register --namespace Microsoft.App
-az provider register --namespace Microsoft.OperationalInsights
-az provider register --namespace Microsoft.Storage
-az provider register --namespace Microsoft.ContainerRegistry
+az provider register --namespace Microsoft.App --wait
+az provider register --namespace Microsoft.OperationalInsights --wait
+az provider register --namespace Microsoft.Storage --wait
+az provider register --namespace Microsoft.ContainerRegistry --wait
 
 info "Creating resource group."
 az group create \

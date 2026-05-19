@@ -49,6 +49,17 @@ def test_azure_shell_scripts_have_valid_syntax_and_help() -> None:
         assert "Usage:" in result.stdout
 
 
+def test_provision_waits_for_provider_registration() -> None:
+    text = (AZURE_DIR / "provision.sh").read_text(encoding="utf-8")
+    for namespace in (
+        "Microsoft.App",
+        "Microsoft.OperationalInsights",
+        "Microsoft.Storage",
+        "Microsoft.ContainerRegistry",
+    ):
+        assert f"az provider register --namespace {namespace} --wait" in text
+
+
 def test_init_env_generates_stable_unique_names(tmp_path: Path) -> None:
     env_file = tmp_path / "env.local"
 
