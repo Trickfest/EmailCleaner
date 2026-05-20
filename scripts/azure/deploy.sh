@@ -6,10 +6,11 @@ usage() {
 Build and deploy the EmailCleaner Azure Container Apps job.
 
 Usage:
-  scripts/azure/deploy.sh [--trigger manual|schedule] [--no-run]
-  scripts/azure/deploy.sh --render-yaml-only [--output PATH] [--image IMAGE]
+  scripts/azure/deploy.sh [--env-file PATH] [--trigger manual|schedule] [--no-run]
+  scripts/azure/deploy.sh --render-yaml-only [--env-file PATH] [--output PATH] [--image IMAGE]
 
 Options:
+  --env-file PATH     Nonsecret Azure settings file. Default: scripts/azure/env.local.
   --trigger VALUE      Job trigger type: manual or schedule. Default: Manual.
   --no-run            Do not start a manual execution after deploy.
   --image IMAGE       Override the image reference used in generated YAML.
@@ -21,7 +22,8 @@ Options:
 Notes:
   - This script mutates Azure unless --render-yaml-only is used.
   - Images are built in Azure with az acr build; local Docker is not required.
-  - Secret values are read from the shell environment and are never printed.
+  - Secret values are read from scripts/azure/secrets.local and root
+    accounts.json, then applied to Container Apps secrets without printing.
 EOF
 }
 
@@ -35,9 +37,15 @@ IMAGE_OVERRIDE=""
 IMAGE_TAG=""
 NO_RUN="0"
 CLI_TRIGGER_TYPE=""
+CLI_ENV_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --env-file)
+      [[ $# -ge 2 ]] || fail "--env-file requires a value."
+      CLI_ENV_FILE="$2"
+      shift 2
+      ;;
     --trigger)
       [[ $# -ge 2 ]] || fail "--trigger requires a value."
       case "$2" in
@@ -80,7 +88,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-load_azure_env
+load_azure_env "$CLI_ENV_FILE"
 if [[ -n "$CLI_TRIGGER_TYPE" ]]; then
   AZURE_JOB_TRIGGER_TYPE="$CLI_TRIGGER_TYPE"
 fi
@@ -110,6 +118,7 @@ fi
 
 require_persistent_resource_names
 require_command az
+load_azure_secret_sources
 validate_secret_env_values
 
 AZURE_SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:-$(az account show --query id --output tsv)}"

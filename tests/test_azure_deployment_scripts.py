@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import textwrap
 from pathlib import Path
 
 
@@ -96,12 +97,13 @@ def test_deploy_render_yaml_only_is_safe_and_manual_by_default(tmp_path: Path) -
     assert init_result.returncode == 0, init_result.stderr
 
     env = os.environ.copy()
-    env["AZURE_ENV_FILE"] = str(env_file)
     env["OPENAI_API_KEY"] = "SHOULD_NOT_APPEAR_IN_SAFE_YAML"
     result = run_command(
         [
             str(AZURE_DIR / "deploy.sh"),
             "--render-yaml-only",
+            "--env-file",
+            str(env_file),
             "--image",
             "example.azurecr.io/emailcleaner:test",
         ],
@@ -134,18 +136,17 @@ def test_deploy_render_yaml_only_allows_schedule_override(tmp_path: Path) -> Non
     )
     assert init_result.returncode == 0, init_result.stderr
 
-    env = os.environ.copy()
-    env["AZURE_ENV_FILE"] = str(env_file)
     result = run_command(
         [
             str(AZURE_DIR / "deploy.sh"),
             "--render-yaml-only",
+            "--env-file",
+            str(env_file),
             "--trigger",
             "schedule",
             "--image",
             "example.azurecr.io/emailcleaner:test",
         ],
-        env=env,
     )
 
     assert result.returncode == 0, result.stderr
@@ -166,20 +167,168 @@ def test_deploy_render_yaml_uses_configured_runtime_cap(tmp_path: Path) -> None:
     )
     assert init_result.returncode == 0, init_result.stderr
 
-    env = os.environ.copy()
-    env["AZURE_ENV_FILE"] = str(env_file)
-    env["AZURE_MAX_RUNTIME_SECONDS"] = "900"
+    text = env_file.read_text(encoding="utf-8")
+    env_file.write_text(text.replace('AZURE_MAX_RUNTIME_SECONDS="3600"', 'AZURE_MAX_RUNTIME_SECONDS="900"'), encoding="utf-8")
     result = run_command(
         [
             str(AZURE_DIR / "deploy.sh"),
             "--render-yaml-only",
+            "--env-file",
+            str(env_file),
             "--image",
             "example.azurecr.io/emailcleaner:test",
         ],
-        env=env,
     )
 
     assert result.returncode == 0, result.stderr
     yaml = result.stdout
     assert '      - "--max-runtime-seconds"' in yaml
     assert '      - "900"' in yaml
+
+
+def test_secret_loader_uses_local_secret_file_and_accounts_json(tmp_path: Path) -> None:
+    env_file = tmp_path / "env.local"
+    secrets_file = tmp_path / "secrets.local"
+    accounts_file = tmp_path / "accounts.json"
+
+    init_result = run_command(
+        [
+            str(AZURE_DIR / "init-env.sh"),
+            "--output",
+            str(env_file),
+        ]
+    )
+    assert init_result.returncode == 0, init_result.stderr
+    with env_file.open("a", encoding="utf-8") as file:
+        file.write(f'export AZURE_SECRETS_FILE="{secrets_file}"\n')
+        file.write(f'export AZURE_ACCOUNTS_SECRET_FILE="{accounts_file}"\n')
+    secrets_file.write_text('export OPENAI_API_KEY="local-openai-key"\n', encoding="utf-8")
+    accounts_file.write_text(
+        """
+{
+  "gmail_accounts": {
+    "1": {
+      "email": "gmail@example.test",
+      "app_password": "gmail-app-password"
+    }
+  },
+  "yahoo_accounts": {
+    "1": {
+      "email": "yahoo@example.test",
+      "app_password": "yahoo-app-password"
+    }
+  }
+}
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {
+            "OPENAI_API_KEY",
+            "EMAIL_CLEANER_GMAIL_EMAIL_1",
+            "EMAIL_CLEANER_GMAIL_APP_PASSWORD_1",
+            "EMAIL_CLEANER_YAHOO_EMAIL_1",
+            "EMAIL_CLEANER_YAHOO_APP_PASSWORD_1",
+        }
+    }
+    result = run_command(
+        [
+            "bash",
+            "-lc",
+            textwrap.dedent(
+                """
+                set -euo pipefail
+                source scripts/azure/common.sh
+                load_azure_env "$1"
+                load_azure_secret_sources
+                validate_secret_env_values
+                printf 'loaded\\n'
+                """
+            ).strip(),
+            "test-shell",
+            str(env_file),
+        ],
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "loaded\n"
+    combined_output = result.stdout + result.stderr
+    assert "local-openai-key" not in combined_output
+    assert "gmail-app-password" not in combined_output
+    assert "yahoo-app-password" not in combined_output
+
+
+def test_secret_loader_ignores_shell_values(tmp_path: Path) -> None:
+    env_file = tmp_path / "env.local"
+    secrets_file = tmp_path / "secrets.local"
+    accounts_file = tmp_path / "accounts.json"
+
+    init_result = run_command(
+        [
+            str(AZURE_DIR / "init-env.sh"),
+            "--output",
+            str(env_file),
+        ]
+    )
+    assert init_result.returncode == 0, init_result.stderr
+    with env_file.open("a", encoding="utf-8") as file:
+        file.write(f'export AZURE_SECRETS_FILE="{secrets_file}"\n')
+        file.write(f'export AZURE_ACCOUNTS_SECRET_FILE="{accounts_file}"\n')
+    secrets_file.write_text('export OPENAI_API_KEY="from-secrets-file"\n', encoding="utf-8")
+    accounts_file.write_text(
+        """
+{
+  "gmail_accounts": {
+    "1": {
+      "email": "from-accounts-json@example.test",
+      "app_password": "gmail-app-password"
+    }
+  },
+  "yahoo_accounts": {
+    "1": {
+      "email": "yahoo@example.test",
+      "app_password": "yahoo-app-password"
+    }
+  }
+}
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "from-shell"
+    env["EMAIL_CLEANER_GMAIL_EMAIL_1"] = "from-shell@example.test"
+
+    result = run_command(
+        [
+            "bash",
+            "-lc",
+            textwrap.dedent(
+                """
+                set -euo pipefail
+                source scripts/azure/common.sh
+                load_azure_env "$1"
+                load_azure_secret_sources
+                validate_secret_env_values
+                if [[ "$OPENAI_API_KEY" == "from-secrets-file" && "$EMAIL_CLEANER_GMAIL_EMAIL_1" == "from-accounts-json@example.test" ]]; then
+                  printf 'local-files-used\\n'
+                else
+                  printf 'shell-values-used\\n'
+                  exit 1
+                fi
+                """
+            ).strip(),
+            "test-shell",
+            str(env_file),
+        ],
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "local-files-used\n"

@@ -138,6 +138,14 @@ secret-backed environment variables for credentials, with `config.json`,
 is operationally easier, store `/data/accounts.json` in the file share, but
 protect the share because that file contains credentials.
 
+For local Azure deployment, keep the repo-root `accounts.json` as the ignored
+source of account credentials and keep `scripts/azure/secrets.local` for
+non-account secrets such as `OPENAI_API_KEY`. `deploy.sh` ignores shell values
+for Azure secret variables, loads values from `scripts/azure/secrets.local`,
+then fills missing `EMAIL_CLEANER_*` account variables from repo-root
+`accounts.json`. The script validates that required values exist before it
+creates Container Apps secrets and never prints secret values.
+
 Container Apps supports secrets and secret-backed environment variables:
 
 - [Manage secrets in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets)
@@ -203,8 +211,9 @@ through a manual Azure Container Apps job execution.
 ## Deployment Scripts
 
 Azure scripts live under `scripts/azure/`. The scripts are idempotent where
-reasonable and default to the production names above, while allowing
-environment-variable overrides.
+reasonable and default to the production names above. Persist deployment
+settings in `scripts/azure/env.local`; do not rely on the interactive shell for
+deployment values.
 
 The implementation includes `scripts/azure/init-env.sh` to create a gitignored
 `scripts/azure/env.local` file. Run it once before using the Azure-mutating
@@ -216,9 +225,10 @@ scripts/azure/init-env.sh
 
 That file stores stable nonsecret names, including the generated eight-digit
 suffix for `AZURE_ACR_NAME` and `AZURE_STORAGE_ACCOUNT`.
-Values exported in the current shell override values from `env.local`, which is
-useful for one-off testing changes such as a shorter runtime cap or a different
-trigger type.
+Edit `env.local` for persistent config changes such as runtime caps, account
+secret names, or resource names. `deploy.sh` also accepts `--trigger` for the
+manual-to-scheduled cutover and `--env-file` when you intentionally want to use
+a different local settings file.
 
 ### `scripts/azure/env.example`
 
@@ -241,6 +251,21 @@ export AZURE_SECRET_ENV_VARS="OPENAI_API_KEY EMAIL_CLEANER_GMAIL_EMAIL_1 EMAIL_C
 ```
 
 Do not put secrets in this file.
+
+### `scripts/azure/secrets.example`
+
+Template for the ignored local `scripts/azure/secrets.local` file. This file is
+for file-based local secret values that are not already in repo-root
+`accounts.json`, primarily:
+
+```bash
+export OPENAI_API_KEY="..."
+```
+
+Account credentials should normally stay in the ignored repo-root
+`accounts.json` file. `deploy.sh` can derive the matching
+`EMAIL_CLEANER_GMAIL_*` and `EMAIL_CLEANER_YAHOO_*` environment variables from
+that JSON file during deployment.
 
 ### `scripts/azure/init-env.sh`
 
@@ -390,9 +415,9 @@ confirmation argument because it deletes state and runtime files.
 
 Internal helper used by `deploy.sh` to render the Container Apps job YAML. It
 can render a safe, secret-reference-only YAML for local inspection and a
-temporary deploy YAML with secret values read from the shell environment. The
-deploy script writes the secret-bearing YAML to a temporary mode-`600` file and
-removes it after use.
+temporary deploy YAML with secret values loaded from `scripts/azure/secrets.local`
+and repo-root `accounts.json`. The deploy script writes the secret-bearing YAML
+to a temporary mode-`600` file and removes it after use.
 
 ## Job YAML Shape
 
@@ -411,9 +436,9 @@ prints reviewable YAML with secret references only. It does not call Azure and
 does not include secret values.
 
 During a real deployment, `deploy.sh` renders a temporary mode-`600` YAML file
-that includes `configuration.secrets` values read from the current shell
-environment. The temporary file is removed after `az containerapp job
-create/update` finishes. Secret values are not printed.
+that includes `configuration.secrets` values loaded from local secret sources.
+The temporary file is removed after `az containerapp job create/update`
+finishes. Secret values are not printed.
 
 The default render is manual-first:
 

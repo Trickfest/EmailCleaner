@@ -37,34 +37,10 @@ print(random.SystemRandom().randrange(10_000_000, 100_000_000))
 PY
 }
 
-save_env_override() {
-  local name="$1"
-  local value_name="__EMAILCLEANER_AZURE_OVERRIDE_${name}"
-  local set_name="${value_name}_SET"
-
-  if [[ -n "${!name+x}" ]]; then
-    printf -v "$value_name" '%s' "${!name}"
-    printf -v "$set_name" '%s' "1"
-  else
-    printf -v "$set_name" '%s' "0"
-  fi
-}
-
-restore_env_override() {
-  local name="$1"
-  local value_name="__EMAILCLEANER_AZURE_OVERRIDE_${name}"
-  local set_name="${value_name}_SET"
-
-  if [[ "${!set_name:-0}" == "1" ]]; then
-    printf -v "$name" '%s' "${!value_name}"
-  fi
-  unset "$value_name" "$set_name"
-}
-
 load_azure_env() {
   AZURE_SCRIPT_DIR="$(azure_script_dir)"
   AZURE_REPO_ROOT="$(azure_repo_root)"
-  AZURE_ENV_FILE="${AZURE_ENV_FILE:-${AZURE_SCRIPT_DIR}/env.local}"
+  AZURE_ENV_FILE="${1:-${AZURE_SCRIPT_DIR}/env.local}"
   local azure_config_vars=(
     AZURE_LOCATION
     AZURE_RESOURCE_GROUP
@@ -88,21 +64,19 @@ load_azure_env() {
     AZURE_ACR_NAME
     AZURE_STORAGE_ACCOUNT
     AZURE_SECRET_ENV_VARS
+    AZURE_SECRETS_FILE
+    AZURE_ACCOUNTS_SECRET_FILE
   )
   local config_var
 
   for config_var in "${azure_config_vars[@]}"; do
-    save_env_override "$config_var"
+    unset "$config_var"
   done
 
   if [[ -f "$AZURE_ENV_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$AZURE_ENV_FILE"
   fi
-
-  for config_var in "${azure_config_vars[@]}"; do
-    restore_env_override "$config_var"
-  done
 
   AZURE_LOCATION="${AZURE_LOCATION:-centralus}"
   AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-rg-emailcleaner-prod}"
@@ -123,6 +97,8 @@ load_azure_env() {
   AZURE_PARALLELISM="${AZURE_PARALLELISM:-1}"
   AZURE_REPLICA_COMPLETION_COUNT="${AZURE_REPLICA_COMPLETION_COUNT:-1}"
   AZURE_SECRET_ENV_VARS="${AZURE_SECRET_ENV_VARS:-OPENAI_API_KEY EMAIL_CLEANER_GMAIL_EMAIL_1 EMAIL_CLEANER_GMAIL_APP_PASSWORD_1 EMAIL_CLEANER_YAHOO_EMAIL_1 EMAIL_CLEANER_YAHOO_APP_PASSWORD_1}"
+  AZURE_SECRETS_FILE="${AZURE_SECRETS_FILE:-${AZURE_SCRIPT_DIR}/secrets.local}"
+  AZURE_ACCOUNTS_SECRET_FILE="${AZURE_ACCOUNTS_SECRET_FILE:-${AZURE_REPO_ROOT}/accounts.json}"
 
   if [[ -n "${AZURE_ACR_NAME:-}" && -n "${AZURE_STORAGE_ACCOUNT:-}" ]]; then
     AZURE_RESOURCE_NAMES_PERSISTED="1"
@@ -177,6 +153,51 @@ secret_name_for_env_var() {
   printf '%s\n' "$1" | tr '[:upper:]_' '[:lower:]-'
 }
 
+load_azure_secret_sources() {
+  local env_name
+
+  for env_name in $AZURE_SECRET_ENV_VARS; do
+    unset "$env_name"
+  done
+
+  if [[ -f "$AZURE_SECRETS_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$AZURE_SECRETS_FILE"
+  fi
+
+  if [[ -f "$AZURE_ACCOUNTS_SECRET_FILE" ]]; then
+    eval "$(python3 - "$AZURE_ACCOUNTS_SECRET_FILE" <<'PY'
+import json
+import os
+import re
+import shlex
+import sys
+from pathlib import Path
+
+accounts_path = Path(sys.argv[1])
+data = json.loads(accounts_path.read_text(encoding="utf-8"))
+sections = (
+    ("gmail_accounts", "EMAIL_CLEANER_GMAIL_EMAIL_", "EMAIL_CLEANER_GMAIL_APP_PASSWORD_"),
+    ("yahoo_accounts", "EMAIL_CLEANER_YAHOO_EMAIL_", "EMAIL_CLEANER_YAHOO_APP_PASSWORD_"),
+)
+
+for section, email_prefix, password_prefix in sections:
+    for key, account in sorted(data.get(section, {}).items()):
+        key = str(key).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]+", key):
+            continue
+        values = (
+            (f"{email_prefix}{key}", str(account.get("email", "")).strip()),
+            (f"{password_prefix}{key}", str(account.get("app_password", "")).strip()),
+        )
+        for env_name, value in values:
+            if value and not os.environ.get(env_name):
+                print(f"export {env_name}={shlex.quote(value)}")
+PY
+)"
+  fi
+}
+
 validate_secret_env_values() {
   local missing=()
   local env_name
@@ -196,7 +217,7 @@ validate_secret_env_values() {
   if (( ${#missing[@]} > 0 )); then
     printf 'Error: Missing required secret environment variable(s):\n' >&2
     printf '  - %s\n' "${missing[@]}" >&2
-    echo "Export them in your shell before running deploy.sh." >&2
+    echo "Set them in ${AZURE_SECRETS_FILE} or ${AZURE_ACCOUNTS_SECRET_FILE} before running deploy.sh." >&2
     exit 1
   fi
 }
