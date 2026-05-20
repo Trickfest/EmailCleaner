@@ -21,6 +21,7 @@ SHELL_SCRIPTS = [
     AZURE_DIR / "destroy.sh",
 ]
 HELP_SCRIPTS = [path for path in SHELL_SCRIPTS if path.name != "common.sh"]
+DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 
 
 def run_command(
@@ -59,6 +60,23 @@ def test_provision_waits_for_provider_registration() -> None:
         "Microsoft.ContainerRegistry",
     ):
         assert f"az provider register --namespace {namespace} --wait" in text
+
+
+def test_dockerignore_limits_acr_build_context() -> None:
+    patterns = [
+        line.strip()
+        for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert patterns[0] == "*"
+    assert "!Dockerfile" in patterns
+    assert "!email_cleaner.py" in patterns
+    assert "!email_cleaner_watchdog.py" in patterns
+    assert "accounts.json" not in patterns
+    assert "config.json" not in patterns
+    assert "rules.json" not in patterns
+    assert "scripts/azure/secrets.local" not in patterns
+    assert "scripts/azure/env.local" not in patterns
 
 
 def test_init_env_generates_stable_unique_names(tmp_path: Path) -> None:

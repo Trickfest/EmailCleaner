@@ -200,6 +200,12 @@ CMD ["--max-runtime-seconds", "3600", "--rules-file", "/data/rules.json", "--acc
 This repo currently has no runtime third-party dependencies, so no
 `requirements.txt` install is required for the container image.
 
+The `.dockerignore` file intentionally sends only `Dockerfile`,
+`email_cleaner.py`, and `email_cleaner_watchdog.py` to Azure Container Registry
+builds. Runtime files and local secrets such as `config.json`, `rules.json`,
+`accounts.json`, `scripts/azure/env.local`, and `scripts/azure/secrets.local`
+must not be part of the cloud build context.
+
 The generated Azure job YAML also sets these command arguments explicitly,
 using `AZURE_MAX_RUNTIME_SECONDS` from `scripts/azure/env.local` for the runtime
 cap. That keeps the cap configurable without changing the Dockerfile.

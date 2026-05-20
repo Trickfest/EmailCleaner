@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!email_cleaner.py
+!email_cleaner_watchdog.py
+
