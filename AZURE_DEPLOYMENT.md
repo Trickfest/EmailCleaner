@@ -210,6 +210,12 @@ The generated Azure job YAML also sets these command arguments explicitly,
 using `AZURE_MAX_RUNTIME_SECONDS` from `scripts/azure/env.local` for the runtime
 cap. That keeps the cap configurable without changing the Dockerfile.
 
+When the job does not exist yet, `deploy.sh` first creates a manual bootstrap
+job with `AZURE_BOOTSTRAP_IMAGE` and a system-assigned managed identity. It then
+grants that identity `AcrPull` on ACR before applying the real EmailCleaner job
+YAML. This avoids a circular first-deploy problem where Azure needs a job
+identity before it can pull the private ACR image.
+
 Local Docker is not required for this deployment. The deployment flow should
 build the image in Azure with ACR Tasks and then validate the running container
 through a manual Azure Container Apps job execution.
@@ -253,6 +259,7 @@ export AZURE_IMAGE_NAME="emailcleaner"
 export AZURE_SCAN_CRON="*/15 * * * *"
 export AZURE_JOB_TRIGGER_TYPE="Manual"
 export AZURE_MAX_RUNTIME_SECONDS="3600"
+export AZURE_BOOTSTRAP_IMAGE="mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
 export AZURE_SECRET_ENV_VARS="OPENAI_API_KEY EMAIL_CLEANER_GMAIL_EMAIL_1 EMAIL_CLEANER_GMAIL_APP_PASSWORD_1 EMAIL_CLEANER_YAHOO_EMAIL_1 EMAIL_CLEANER_YAHOO_APP_PASSWORD_1"
 ```
 

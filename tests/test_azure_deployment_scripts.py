@@ -79,6 +79,17 @@ def test_dockerignore_limits_acr_build_context() -> None:
     assert "scripts/azure/env.local" not in patterns
 
 
+def test_deploy_bootstraps_identity_before_applying_private_acr_yaml() -> None:
+    text = (AZURE_DIR / "deploy.sh").read_text(encoding="utf-8")
+    bootstrap_index = text.index("Creating bootstrap Container Apps job")
+    create_index = text.index("az containerapp job create", bootstrap_index)
+    acrpull_index = text.index("ensure_acr_pull", create_index)
+    update_index = text.index("az containerapp job update", acrpull_index)
+    assert "--mi-system-assigned true" in text[create_index:acrpull_index]
+    assert "--image \"$AZURE_BOOTSTRAP_IMAGE\"" in text[create_index:acrpull_index]
+    assert update_index > acrpull_index
+
+
 def test_init_env_generates_stable_unique_names(tmp_path: Path) -> None:
     env_file = tmp_path / "env.local"
 
