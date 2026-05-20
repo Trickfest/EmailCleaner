@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import email_cleaner as app
-from tests.helpers import make_summary
+from tests.helpers import make_scanner_rules, make_summary
 
 
 def clear_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,6 +186,7 @@ def test_build_daily_summary_account_stats_counts_aggregate_actions() -> None:
         messages=[quarantined, llm_delete, llm_error],
         scanned_folder_count=3,
         cleanup_result=cleanup_result,
+        quarantine_folder_messages=5,
     )
 
     assert stats.messages_processed == 3
@@ -195,6 +196,46 @@ def test_build_daily_summary_account_stats_counts_aggregate_actions() -> None:
     assert stats.llm_delete_candidates == 1
     assert stats.llm_failures == 1
     assert stats.cleanup_deleted == 2
+    assert stats.quarantine_folder_messages == 5
+
+
+def test_print_report_distinguishes_move_count_from_current_quarantine_count(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    message = make_summary()
+    message.delete_candidate = True
+    message.delete_reason = "always_delete.sender"
+    message.action = "QUARANTINED"
+    cleanup_result = app.QuarantineCleanupResult(
+        status="OK",
+        configured_days=7,
+        cutoff_date="10-May-2026",
+        matched_count=3,
+        deleted_count=3,
+        would_delete_count=0,
+        store_failed_count=0,
+        detail="",
+    )
+
+    app.print_report(
+        account=make_account(),
+        messages=[message],
+        scanned_folder_count=1,
+        scanner_rules=make_scanner_rules(quarantine_cleanup_days=7),
+        hard_delete=False,
+        dry_run=False,
+        quarantine_folder="Quarantine",
+        quarantine_will_be_created=False,
+        cleanup_result=cleanup_result,
+        openai_config=None,
+        quarantine_folder_messages=2,
+    )
+
+    output = capsys.readouterr().out
+    assert "Moved to Quarantine message(s): 1 (target folder: Quarantine)" in output
+    assert "Quarantine cleanup deleted: 3 message(s)." in output
+    assert "Quarantine folder now contains: 2 message(s)." in output
+    assert "Quarantined message(s):" not in output
 
 
 def test_format_daily_summary_body_includes_zero_report_for_all_accounts() -> None:
@@ -208,7 +249,8 @@ def test_format_daily_summary_body_includes_zero_report_for_all_accounts() -> No
     )
 
     assert "Messages processed: 0" in body
-    assert "Quarantined: 0" in body
+    assert "Moved to Quarantine: 0" in body
+    assert "Quarantine folder after latest cleanup: unknown" in body
     assert "gmail:MAIN (main@example.test)" in body
     assert "Errors:\n  None" in body
 
@@ -242,6 +284,7 @@ def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
                     cleanup_deleted=2,
                     cleanup_failures=0,
                     errors=(),
+                    quarantine_folder_messages=7,
                 ),
                 "yahoo:ARCHIVE": app.DailySummaryAccountStats(
                     provider="yahoo",
@@ -258,6 +301,7 @@ def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
                     cleanup_deleted=1,
                     cleanup_failures=0,
                     errors=("folder scan failed: SELECT_FAILED",),
+                    quarantine_folder_messages=3,
                 ),
             },
             errors=(),
@@ -281,39 +325,95 @@ def test_format_daily_summary_body_uses_multiline_account_sections() -> None:
         "Totals:\n"
         "  Messages processed: 47\n"
         "  Delete candidates: 12\n"
-        "  Quarantined: 12\n"
+        "  Moved to Quarantine: 12\n"
         "  Quarantine failures: 0\n"
         "  OpenAI evaluated: 18\n"
         "  OpenAI delete candidates: 5\n"
         "  OpenAI failures: 3\n"
         "  Quarantine cleanup deleted: 3\n"
         "  Quarantine cleanup failures: 0\n"
+        "  Quarantine folder after latest cleanup: 10\n"
         "\n"
         "Per account:\n"
         "  gmail:MAIN (main@example.test)\n"
         "    Messages processed: 31\n"
         "    Delete candidates: 8\n"
-        "    Quarantined: 8\n"
+        "    Moved to Quarantine: 8\n"
         "    Quarantine failures: 0\n"
         "    OpenAI evaluated: 12\n"
         "    OpenAI delete candidates: 3\n"
         "    OpenAI failures: 1\n"
         "    Quarantine cleanup deleted: 2\n"
         "    Quarantine cleanup failures: 0\n"
+        "    Quarantine folder after cleanup: 7\n"
         "  yahoo:ARCHIVE (archive@example.test)\n"
         "    Messages processed: 16\n"
         "    Delete candidates: 4\n"
-        "    Quarantined: 4\n"
+        "    Moved to Quarantine: 4\n"
         "    Quarantine failures: 0\n"
         "    OpenAI evaluated: 6\n"
         "    OpenAI delete candidates: 2\n"
         "    OpenAI failures: 2\n"
         "    Quarantine cleanup deleted: 1\n"
         "    Quarantine cleanup failures: 0\n"
+        "    Quarantine folder after cleanup: 3\n"
         "\n"
         "Errors:\n"
         "  - 2026-05-17T05:45:00+00:00: yahoo:ARCHIVE: folder scan failed: SELECT_FAILED\n"
     )
+
+
+def test_daily_summary_uses_latest_quarantine_folder_count_not_sum() -> None:
+    account = make_account()
+    state = app.empty_daily_summary_state()
+    first_run = datetime(2026, 5, 17, 5, 30, tzinfo=timezone.utc)
+    second_run = datetime(2026, 5, 17, 5, 45, tzinfo=timezone.utc)
+
+    for ended_at, moved_count, folder_count in (
+        (first_run, 5, 10),
+        (second_run, 1, 6),
+    ):
+        app.append_daily_summary_run_record(
+            state,
+            app.DailySummaryRunRecord(
+                started_at=(ended_at - timedelta(minutes=5)).isoformat(timespec="seconds"),
+                ended_at=ended_at.isoformat(timespec="seconds"),
+                status="success",
+                exit_code=0,
+                accounts={
+                    "gmail:MAIN": app.DailySummaryAccountStats(
+                        provider="gmail",
+                        account_key="MAIN",
+                        email="main@example.test",
+                        scanned_folders=1,
+                        messages_processed=moved_count,
+                        delete_candidates=moved_count,
+                        quarantined=moved_count,
+                        quarantine_failures=0,
+                        llm_evaluated=0,
+                        llm_delete_candidates=0,
+                        llm_failures=0,
+                        cleanup_deleted=0,
+                        cleanup_failures=0,
+                        errors=(),
+                        quarantine_folder_messages=folder_count,
+                    )
+                },
+                errors=(),
+            ),
+            now=ended_at,
+        )
+
+    body = app.format_daily_summary_body(
+        daily_summary_state=state,
+        accounts=[account],
+        window_start=datetime(2026, 5, 17, 5, 0, tzinfo=timezone.utc),
+        window_end=datetime(2026, 5, 17, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert "Moved to Quarantine: 6" in body
+    assert "Quarantine folder after latest cleanup: 6" in body
+    assert "Quarantine folder after latest cleanup: 16" not in body
 
 
 def test_send_daily_summary_email_uses_configured_sender(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -454,6 +554,7 @@ def test_main_records_and_sends_daily_summary(monkeypatch: pytest.MonkeyPatch, t
             detail="",
         ),
     )
+    monkeypatch.setattr(app, "count_mailbox_messages", lambda *_args, **_kwargs: 2)
 
     sent_messages = []
 
@@ -482,9 +583,11 @@ def test_main_records_and_sends_daily_summary(monkeypatch: pytest.MonkeyPatch, t
     assert len(records) == 1
     assert records[0]["accounts"]["gmail:MAIN"]["messages_processed"] == 1
     assert records[0]["accounts"]["gmail:MAIN"]["quarantined"] == 1
+    assert records[0]["accounts"]["gmail:MAIN"]["quarantine_folder_messages"] == 2
     assert state["daily_summary"]["last_sent_at"]
     assert state["daily_summary"]["last_sent_local_date"]
     assert len(sent_messages) == 1
     body = sent_messages[0].get_content()
     assert "Messages processed: 1" in body
-    assert "Quarantined: 1" in body
+    assert "Moved to Quarantine: 1" in body
+    assert "Quarantine folder after latest cleanup: 2" in body

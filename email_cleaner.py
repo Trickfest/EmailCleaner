@@ -257,6 +257,7 @@ class DailySummaryAccountStats:
     cleanup_deleted: int
     cleanup_failures: int
     errors: tuple[str, ...]
+    quarantine_folder_messages: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2209,6 +2210,45 @@ def select_folder(imap: imaplib.IMAP4_SSL, folder_name: str, readonly: bool) -> 
     return status == "OK"
 
 
+def parse_select_message_count(data: object) -> int | None:
+    if not isinstance(data, list) or not data:
+        return None
+    value = data[0]
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="ignore")
+    if isinstance(value, str):
+        value = value.strip()
+    if isinstance(value, bool):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, count)
+
+
+def count_mailbox_messages(imap: imaplib.IMAP4_SSL, folder_name: str) -> int | None:
+    try:
+        existing_mailbox = find_mailbox_name(imap, folder_name)
+        if not existing_mailbox:
+            return None
+
+        status, data = imap.select(quote_mailbox_name(existing_mailbox), readonly=True)
+        if status != "OK":
+            return None
+
+        selected_count = parse_select_message_count(data)
+        if selected_count is not None:
+            return selected_count
+
+        search_status, search_data = imap.uid("SEARCH", None, "ALL")
+        if search_status != "OK":
+            return None
+        return len(parse_uid_search_data(search_data))
+    except (imaplib.IMAP4.error, OSError):
+        return None
+
+
 def scan_new_messages(
     imap: imaplib.IMAP4_SSL,
     account: AccountCredentials,
@@ -2395,6 +2435,7 @@ def build_daily_summary_account_stats(
     scanned_folder_count: int,
     cleanup_result: QuarantineCleanupResult,
     errors: Iterable[str] = (),
+    quarantine_folder_messages: int | None = None,
 ) -> DailySummaryAccountStats:
     delete_candidates = sum(
         1 for message in messages if not message.never_filter_match and message.delete_candidate
@@ -2430,6 +2471,7 @@ def build_daily_summary_account_stats(
         cleanup_deleted=cleanup_result.deleted_count,
         cleanup_failures=cleanup_failure_count,
         errors=combined_errors,
+        quarantine_folder_messages=quarantine_folder_messages,
     )
 
 
@@ -2537,6 +2579,13 @@ def int_stat(payload: dict[str, object], key: str) -> int:
     return max(0, value)
 
 
+def optional_int_stat(payload: dict[str, object], key: str) -> int | None:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return max(0, value)
+
+
 def empty_account_totals(account: AccountCredentials) -> dict[str, object]:
     return {
         "provider": account.provider,
@@ -2551,6 +2600,7 @@ def empty_account_totals(account: AccountCredentials) -> dict[str, object]:
         "llm_failures": 0,
         "cleanup_deleted": 0,
         "cleanup_failures": 0,
+        "quarantine_folder_messages": None,
         "errors": [],
     }
 
@@ -2565,6 +2615,17 @@ def aggregate_daily_summary(
         account_state_key(account.provider, account.account_key): empty_account_totals(account)
         for account in accounts
     }
+    summed_stat_keys = (
+        "messages_processed",
+        "delete_candidates",
+        "quarantined",
+        "quarantine_failures",
+        "llm_evaluated",
+        "llm_delete_candidates",
+        "llm_failures",
+        "cleanup_deleted",
+        "cleanup_failures",
+    )
     totals = {
         "messages_processed": 0,
         "delete_candidates": 0,
@@ -2575,9 +2636,11 @@ def aggregate_daily_summary(
         "llm_failures": 0,
         "cleanup_deleted": 0,
         "cleanup_failures": 0,
+        "quarantine_folder_messages": None,
     }
     errors: list[str] = []
     run_count = 0
+    latest_quarantine_count_at: dict[str, datetime] = {}
 
     raw_records = daily_summary_state.get("run_records", [])
     records = raw_records if isinstance(raw_records, list) else []
@@ -2617,13 +2680,24 @@ def aggregate_daily_summary(
                     "llm_failures": 0,
                     "cleanup_deleted": 0,
                     "cleanup_failures": 0,
+                    "quarantine_folder_messages": None,
                     "errors": [],
                 },
             )
-            for key in totals:
+            for key in summed_stat_keys:
                 value = int_stat(raw_account_stats, key)
                 totals[key] += value
                 account_total[key] = int(account_total[key]) + value
+
+            quarantine_folder_messages = optional_int_stat(
+                raw_account_stats,
+                "quarantine_folder_messages",
+            )
+            if quarantine_folder_messages is not None:
+                previous_record_time = latest_quarantine_count_at.get(state_key)
+                if previous_record_time is None or record_time >= previous_record_time:
+                    account_total["quarantine_folder_messages"] = quarantine_folder_messages
+                    latest_quarantine_count_at[state_key] = record_time
 
             account_errors = account_total["errors"]
             raw_account_errors = raw_account_stats.get("errors", [])
@@ -2633,6 +2707,15 @@ def aggregate_daily_summary(
                         error_text = f"{state_key}: {error.strip()}"
                         account_errors.append(error_text)
                         errors.append(f"{record_time_text}: {error_text}")
+
+    latest_quarantine_counts = [
+        account_total.get("quarantine_folder_messages")
+        for account_total in account_totals.values()
+    ]
+    if latest_quarantine_counts and all(
+        isinstance(value, int) for value in latest_quarantine_counts
+    ):
+        totals["quarantine_folder_messages"] = sum(latest_quarantine_counts)
 
     return {
         "run_count": run_count,
@@ -2656,6 +2739,12 @@ def format_daily_summary_body(
     )
     totals = summary["totals"]
     errors = summary["errors"]
+    total_quarantine_count = totals["quarantine_folder_messages"]
+    total_quarantine_count_text = (
+        str(total_quarantine_count)
+        if isinstance(total_quarantine_count, int)
+        else "unknown"
+    )
     lines = [
         "EmailCleaner summary",
         f"Window: {window_start.isoformat(timespec='seconds')} to {window_end.isoformat(timespec='seconds')}",
@@ -2665,13 +2754,14 @@ def format_daily_summary_body(
         "Totals:",
         f"  Messages processed: {totals['messages_processed']}",
         f"  Delete candidates: {totals['delete_candidates']}",
-        f"  Quarantined: {totals['quarantined']}",
+        f"  Moved to Quarantine: {totals['quarantined']}",
         f"  Quarantine failures: {totals['quarantine_failures']}",
         f"  OpenAI evaluated: {totals['llm_evaluated']}",
         f"  OpenAI delete candidates: {totals['llm_delete_candidates']}",
         f"  OpenAI failures: {totals['llm_failures']}",
         f"  Quarantine cleanup deleted: {totals['cleanup_deleted']}",
         f"  Quarantine cleanup failures: {totals['cleanup_failures']}",
+        f"  Quarantine folder after latest cleanup: {total_quarantine_count_text}",
         "",
         "Per account:",
     ]
@@ -2680,18 +2770,25 @@ def format_daily_summary_body(
     for state_key in sorted(account_totals):
         account = account_totals[state_key]
         account_label = f"{state_key} ({account['email']})" if account.get("email") else state_key
+        account_quarantine_count = account.get("quarantine_folder_messages")
+        account_quarantine_count_text = (
+            str(account_quarantine_count)
+            if isinstance(account_quarantine_count, int)
+            else "unknown"
+        )
         lines.extend(
             [
                 f"  {account_label}",
                 f"    Messages processed: {account['messages_processed']}",
                 f"    Delete candidates: {account['delete_candidates']}",
-                f"    Quarantined: {account['quarantined']}",
+                f"    Moved to Quarantine: {account['quarantined']}",
                 f"    Quarantine failures: {account['quarantine_failures']}",
                 f"    OpenAI evaluated: {account['llm_evaluated']}",
                 f"    OpenAI delete candidates: {account['llm_delete_candidates']}",
                 f"    OpenAI failures: {account['llm_failures']}",
                 f"    Quarantine cleanup deleted: {account['cleanup_deleted']}",
                 f"    Quarantine cleanup failures: {account['cleanup_failures']}",
+                f"    Quarantine folder after cleanup: {account_quarantine_count_text}",
             ]
         )
 
@@ -2762,6 +2859,7 @@ def print_report(
     quarantine_will_be_created: bool,
     cleanup_result: QuarantineCleanupResult,
     openai_config: OpenAIConfig | None,
+    quarantine_folder_messages: int | None = None,
 ) -> None:
     protected_count = sum(1 for message in messages if message.never_filter_match)
     delete_candidate_count = sum(
@@ -2865,8 +2963,14 @@ def print_report(
             print(f"Quarantine folder would be created: {quarantine_folder}")
         print(f"Would-quarantine failures: {would_quarantine_failed_count}")
     else:
-        print(f"Quarantined message(s): {quarantined_count} (target folder: {quarantine_folder})")
+        print(f"Moved to Quarantine message(s): {quarantined_count} (target folder: {quarantine_folder})")
         print(f"Quarantine failures (will retry next run): {quarantine_failed_count}")
+    if not hard_delete and quarantine_folder_messages is not None:
+        count_label = "currently" if dry_run else "now"
+        print(
+            f"Quarantine folder {count_label} contains: "
+            f"{quarantine_folder_messages} message(s)."
+        )
     print(f"Filter-eligible message(s): {filter_eligible_count}")
     if not messages:
         return
@@ -3086,6 +3190,9 @@ def main() -> int:
                     dry_run=args.dry_run,
                     runtime_budget=runtime_budget,
                 )
+                quarantine_folder_messages = None
+                if not args.hard_delete:
+                    quarantine_folder_messages = count_mailbox_messages(imap, quarantine_folder)
                 accounts_state[state_key] = updated_state
                 all_messages.extend(messages)
                 daily_summary_account_stats[state_key] = build_daily_summary_account_stats(
@@ -3093,6 +3200,7 @@ def main() -> int:
                     messages=messages,
                     scanned_folder_count=scanned_count,
                     cleanup_result=cleanup_result,
+                    quarantine_folder_messages=quarantine_folder_messages,
                 )
                 account_stats_recorded = True
                 print_report(
@@ -3106,6 +3214,7 @@ def main() -> int:
                     quarantine_will_be_created=quarantine_will_be_created,
                     cleanup_result=cleanup_result,
                     openai_config=app_config.openai,
+                    quarantine_folder_messages=quarantine_folder_messages,
                 )
         except RuntimeLimitExceeded as error:
             timeout_reason = str(error)

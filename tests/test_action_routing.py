@@ -79,6 +79,26 @@ def test_scan_default_mode_moves_delete_candidate_to_quarantine(monkeypatch: pyt
     assert folders_state["INBOX"]["processed_uids"] == ["100"]
 
 
+def test_count_mailbox_messages_reads_selected_mailbox_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CountIMAP:
+        selected: tuple[str, bool] | None = None
+
+        def select(self, mailbox: str, readonly: bool = False):
+            self.selected = (mailbox, readonly)
+            return "OK", [b"2"]
+
+        def uid(self, *_args):
+            raise AssertionError("SEARCH fallback should not run when SELECT returns a count")
+
+    imap = CountIMAP()
+    monkeypatch.setattr(app, "find_mailbox_name", lambda _imap, _folder: "Quarantine")
+
+    assert app.count_mailbox_messages(imap, "Quarantine") == 2
+    assert imap.selected == ('"Quarantine"', True)
+
+
 def test_scan_dry_run_reports_would_quarantine(monkeypatch: pytest.MonkeyPatch) -> None:
     rules = make_scanner_rules(always_delete_senders={"sender@example.test"})
     patch_common_scan_dependencies(monkeypatch, summary_factory=make_summary)

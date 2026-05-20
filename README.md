@@ -25,6 +25,9 @@ For macOS background installation with LaunchDaemon, see
 For Azure deployment planning, see
 [`AZURE_DEPLOYMENT.md`](AZURE_DEPLOYMENT.md).
 
+For the planned per-account folder selection feature, see
+[`FOLDER_SCAN_OPTIONS.md`](FOLDER_SCAN_OPTIONS.md).
+
 ## Setup
 
 ### 1. Create App Passwords
@@ -146,9 +149,13 @@ Summary email settings:
   summary if a previous summary was sent later in the day. The default is
   `1440` minutes. For testing summary content, use a shorter value such as
   `15`.
-- Summaries contain aggregate totals only: processed/quarantined counts,
-  quarantine/OpenAI/cleanup counts, OpenAI failure counts, and errors. They do
-  not include message sender, subject, or body details.
+- Summaries contain aggregate totals only: processed counts, messages moved to
+  `Quarantine`, quarantine/OpenAI/cleanup counts, OpenAI failure counts, and
+  errors. They do not include message sender, subject, or body details.
+- `Moved to Quarantine` is the count moved during the summary window. The
+  `Quarantine folder after latest cleanup` count is the latest visible folder
+  count recorded after cleanup, so cleanup can make it lower than the number
+  moved during the window.
 - Summary emails are skipped in `--dry-run` mode because dry runs do not write
   state or perform mailbox/email side effects.
 
@@ -163,35 +170,38 @@ Status: errors detected
 Totals:
   Messages processed: 47
   Delete candidates: 12
-  Quarantined: 12
+  Moved to Quarantine: 12
   Quarantine failures: 0
   OpenAI evaluated: 18
   OpenAI delete candidates: 5
   OpenAI failures: 3
   Quarantine cleanup deleted: 3
   Quarantine cleanup failures: 0
+  Quarantine folder after latest cleanup: 10
 
 Per account:
   gmail:MAIN (main@example.test)
     Messages processed: 31
     Delete candidates: 8
-    Quarantined: 8
+    Moved to Quarantine: 8
     Quarantine failures: 0
     OpenAI evaluated: 12
     OpenAI delete candidates: 3
     OpenAI failures: 1
     Quarantine cleanup deleted: 2
     Quarantine cleanup failures: 0
+    Quarantine folder after cleanup: 7
   yahoo:ARCHIVE (archive@example.test)
     Messages processed: 16
     Delete candidates: 4
-    Quarantined: 4
+    Moved to Quarantine: 4
     Quarantine failures: 0
     OpenAI evaluated: 6
     OpenAI delete candidates: 2
     OpenAI failures: 2
     Quarantine cleanup deleted: 1
     Quarantine cleanup failures: 0
+    Quarantine folder after cleanup: 3
 
 Errors:
   - yahoo:ARCHIVE: folder scan failed: SELECT_FAILED

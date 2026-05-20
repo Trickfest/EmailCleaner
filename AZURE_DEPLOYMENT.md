@@ -407,17 +407,22 @@ Shows:
 
 ### `scripts/azure/logs.sh`
 
-Queries recent logs. The first implementation can call Azure CLI job logs:
+Shows recent logs for the latest execution by default:
 
 ```bash
-az containerapp job logs show \
-  --name "$AZURE_JOB_NAME" \
-  --resource-group "$AZURE_RESOURCE_GROUP"
+scripts/azure/logs.sh --tail 100
 ```
 
-For more reliable historical logs, query Log Analytics. Container Apps job logs
-are written to the environment's configured logging provider; by default this is
-Log Analytics in the quickstart path.
+For a specific execution:
+
+```bash
+scripts/azure/logs.sh --execution "$EXECUTION_NAME" --tail 300
+```
+
+Without `--follow`, the script reads from Log Analytics so completed execution
+logs remain visible after Container Apps prunes replica metadata. With
+`--follow`, it uses `az containerapp job logs show` against the active
+execution/replica for live streaming.
 
 ### `scripts/azure/destroy.sh`
 
@@ -544,7 +549,7 @@ status script should make common questions easy:
 - Did the last execution succeed?
 - When did it run?
 - How many messages were processed?
-- Were any messages quarantined?
+- Were any messages moved to Quarantine?
 - Were any OpenAI calls evaluated or failed?
 - Is stderr empty?
 
