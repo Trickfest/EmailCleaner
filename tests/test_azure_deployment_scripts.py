@@ -85,7 +85,7 @@ def test_deploy_bootstraps_identity_before_applying_private_acr_yaml() -> None:
     create_index = text.index("az containerapp job create", bootstrap_index)
     acrpull_index = text.index("ensure_acr_pull", create_index)
     update_index = text.index("az containerapp job update", acrpull_index)
-    assert "--mi-system-assigned true" in text[create_index:acrpull_index]
+    assert "--mi-system-assigned \\" in text[create_index:acrpull_index]
     assert "--image \"$AZURE_BOOTSTRAP_IMAGE\"" in text[create_index:acrpull_index]
     assert update_index > acrpull_index
 

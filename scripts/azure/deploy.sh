@@ -194,7 +194,7 @@ if [[ "$job_exists" == "0" ]]; then
     --image "$AZURE_BOOTSTRAP_IMAGE" \
     --cpu "$AZURE_CPU" \
     --memory "$AZURE_MEMORY" \
-    --mi-system-assigned true \
+    --mi-system-assigned \
     --output table
 fi
 
