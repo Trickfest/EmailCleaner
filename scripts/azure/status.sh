@@ -53,11 +53,27 @@ section() {
   echo "==> $*"
 }
 
+print_resource_config_summary() {
+  cat <<EOF
+Azure deployment resource configuration:
+  resource group:        ${AZURE_RESOURCE_GROUP}
+  location:              ${AZURE_LOCATION}
+  container apps env:    ${AZURE_CONTAINERAPPS_ENV}
+  job name:              ${AZURE_JOB_NAME}
+  ACR:                   ${AZURE_ACR_NAME}
+  storage account:       ${AZURE_STORAGE_ACCOUNT}
+  file share:            ${AZURE_FILE_SHARE}
+  storage mount name:    ${AZURE_STORAGE_MOUNT_NAME}
+  log workspace:         ${AZURE_LOG_WORKSPACE}
+  image name:            ${AZURE_IMAGE_NAME}
+EOF
+}
+
 section "Azure Account"
 az account show --output table
 
-section "Deployment Configuration"
-print_config_summary
+section "Deployment Resource Configuration"
+print_resource_config_summary
 
 section "Resource Group"
 az group show \
@@ -68,7 +84,7 @@ section "Container Apps Job"
 az containerapp job show \
   --name "$AZURE_JOB_NAME" \
   --resource-group "$AZURE_RESOURCE_GROUP" \
-  --query "{name:name,location:location,trigger:properties.configuration.triggerType,replicaTimeout:properties.configuration.replicaTimeout,replicaRetryLimit:properties.configuration.replicaRetryLimit}" \
+  --query "{name:name,location:location,trigger:properties.configuration.triggerType,cron:properties.configuration.scheduleTriggerConfig.cronExpression,image:properties.template.containers[0].image,replicaTimeout:properties.configuration.replicaTimeout,replicaRetryLimit:properties.configuration.replicaRetryLimit}" \
   --output table
 
 section "Recent Executions"
