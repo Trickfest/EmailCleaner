@@ -25,7 +25,7 @@ For macOS background installation with LaunchDaemon, see
 For Azure deployment planning, see
 [`AZURE_DEPLOYMENT.md`](AZURE_DEPLOYMENT.md).
 
-For the planned per-account folder selection feature, see
+For per-account folder selection details, see
 [`FOLDER_SCAN_OPTIONS.md`](FOLDER_SCAN_OPTIONS.md).
 
 ## Setup
@@ -113,6 +113,14 @@ Example:
     "summary_time": "06:00",
     "summary_interval_minutes": 1440
   },
+  "account_scans": {
+    "gmail:JANE": {
+      "folders": ["INBOX"]
+    },
+    "yahoo:JOHN": {
+      "folders": "all"
+    }
+  },
   "openai": {
     "enabled": true,
     "model": "gpt-5-mini",
@@ -133,6 +141,25 @@ General settings:
 - `max_tracked_uids` controls the per-folder processed UID history limit in
   state and defaults to `5000`.
 - `--max-tracked-uids` overrides `max_tracked_uids` for one run.
+
+Per-account folder scan settings:
+
+- `account_scans` is optional. If an account is not listed, EmailCleaner scans
+  all allowed folders for that account.
+- Account keys use `provider:ACCOUNT_KEY` format, for example `gmail:JANE`.
+- `folders: "all"` scans every discovered folder except excluded folders.
+- `folders: ["INBOX"]` scans only the listed folders after validating that
+  each folder exists and is not excluded.
+- `INBOX` matching is case-insensitive. Other folder names must match exactly
+  as returned by IMAP `LIST`.
+- Invalid `account_scans` shape or unknown account references are startup
+  configuration errors.
+- Missing or excluded folders for one account are account-level errors:
+  EmailCleaner skips that account, continues other accounts, records the error
+  in summary history, and exits nonzero.
+- Gmail often exposes the same message through multiple IMAP folders such as
+  `INBOX`, `[Gmail]/All Mail`, and `[Gmail]/Important`. Use
+  `folders: ["INBOX"]` for a Gmail account when you want Inbox-only scanning.
 
 Summary email settings:
 
@@ -396,6 +423,20 @@ State handling:
 Excluded folders include `Quarantine`, provider bulk folders, and folders
 identified as spam/trash/junk by IMAP flags or folder names containing `spam`,
 `trash`, `bulk`, or `junk` case-insensitively.
+
+Run output shows the active folder policy for each account:
+
+```text
+Folder scan mode: all allowed folders.
+Scanned 9 folder(s).
+```
+
+or:
+
+```text
+Folder scan mode: configured list (1 folder): INBOX.
+Scanned 1 folder(s).
+```
 
 ## Tests
 

@@ -523,6 +523,11 @@ def test_main_records_and_sends_daily_summary(monkeypatch: pytest.MonkeyPatch, t
 
     monkeypatch.setattr(app.imaplib, "IMAP4_SSL", lambda *_args, **_kwargs: FakeIMAPConnection())
     monkeypatch.setattr(app, "ensure_mailbox_exists", lambda _imap, _folder: "Quarantine")
+    monkeypatch.setattr(
+        app,
+        "discover_folders",
+        lambda _imap: [app.FolderInfo(name="INBOX", flags=set())],
+    )
 
     message = make_summary()
     message.account_provider = "gmail"

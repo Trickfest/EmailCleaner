@@ -32,6 +32,7 @@ def make_app_config(*, max_tracked_uids: int = 5000) -> app.AppConfig:
             summary_time="06:00",
             summary_interval_minutes=1440,
         ),
+        account_scans={},
         max_tracked_uids=max_tracked_uids,
     )
 
@@ -64,6 +65,7 @@ def test_load_app_config_defaults_when_file_missing(tmp_path) -> None:
     assert config.daily_summary.summary_recipients == ()
     assert config.daily_summary.summary_time == "06:00"
     assert config.daily_summary.summary_interval_minutes == 1440
+    assert config.account_scans == {}
 
 
 def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
@@ -92,6 +94,14 @@ def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
                     "summary_time": "6:05",
                     "summary_interval_minutes": 15,
                 },
+                "account_scans": {
+                    "gmail:main": {
+                        "folders": ["inbox"],
+                    },
+                    "yahoo:archive": {
+                        "folders": "all",
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -114,6 +124,10 @@ def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
     )
     assert config.daily_summary.summary_time == "06:05"
     assert config.daily_summary.summary_interval_minutes == 15
+    assert config.account_scans == {
+        "gmail:MAIN": app.AccountScanConfig(folders=("inbox",)),
+        "yahoo:ARCHIVE": app.AccountScanConfig(folders=None),
+    }
     assert config.max_tracked_uids == 1200
 
 
@@ -150,6 +164,14 @@ def test_load_app_config_reads_imap_and_openai_sections(tmp_path) -> None:
         ({"daily_summary": {"summary_recipients": "not-an-email"}}, "summary_recipients"),
         ({"max_tracked_uids": 0}, "max_tracked_uids"),
         ({"max_tracked_uids": "1000"}, "max_tracked_uids"),
+        ({"account_scans": []}, "account_scans"),
+        ({"account_scans": {"gmail": {"folders": ["INBOX"]}}}, "provider:ACCOUNT_KEY"),
+        ({"account_scans": {"icloud:MAIN": {"folders": ["INBOX"]}}}, "provider must be one of"),
+        ({"account_scans": {"gmail:MAIN": {}}}, "folders is required"),
+        ({"account_scans": {"gmail:MAIN": {"folders": "INBOX"}}}, 'must be "all"'),
+        ({"account_scans": {"gmail:MAIN": {"folders": []}}}, "empty array"),
+        ({"account_scans": {"gmail:MAIN": {"folders": ["INBOX", "inbox"]}}}, "duplicate"),
+        ({"account_scans": {"gmail:MAIN": {"folders": ["INBOX", 1]}}}, "non-empty string"),
     ],
 )
 def test_load_app_config_rejects_invalid_values(tmp_path, payload: dict[str, object], match: str) -> None:

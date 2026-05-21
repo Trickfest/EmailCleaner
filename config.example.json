@@ -10,6 +10,16 @@
     "summary_time": "06:00",
     "summary_interval_minutes": 1440
   },
+  "account_scans": {
+    "gmail:MAIN": {
+      "folders": [
+        "INBOX"
+      ]
+    },
+    "yahoo:MAIN": {
+      "folders": "all"
+    }
+  },
   "openai": {
     "enabled": false,
     "model": "gpt-5-mini",

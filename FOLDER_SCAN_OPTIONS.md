@@ -1,12 +1,12 @@
-# Folder Scan Options Design
+# Folder Scan Options
 
 ## Purpose
 
-EmailCleaner currently scans all discovered folders except excluded folders such
-as `Quarantine`, Spam, Trash, Junk, and Bulk. That remains the default.
+EmailCleaner scans all discovered folders except excluded folders such as
+`Quarantine`, Spam, Trash, Junk, and Bulk by default.
 
-This feature will add per-account folder selection so each configured account
-can either:
+It also supports per-account folder selection so each configured account can
+either:
 
 - scan all allowed folders, or
 - scan only an explicit list of folders.
@@ -14,12 +14,13 @@ can either:
 The immediate motivation is Gmail. Gmail exposes one underlying message through
 multiple IMAP mailboxes such as `INBOX`, `[Gmail]/All Mail`, and
 `[Gmail]/Important`. Scanning every allowed mailbox can therefore make one
-visible Inbox message appear as multiple newly processed messages.
+visible Inbox message appear as multiple newly processed messages. Configuring a
+Gmail account to scan only `INBOX` avoids that duplicate folder exposure.
 
-## Proposed Configuration
+## Configuration
 
-Put this in `config.json`, not `accounts.json`. Folder selection is non-secret
-runtime behavior, and Azure currently supplies account credentials through
+Put folder scan settings in `config.json`, not `accounts.json`. Folder selection
+is non-secret runtime behavior, and Azure supplies account credentials through
 secrets/env vars rather than uploading `accounts.json`.
 
 Example:
@@ -40,7 +41,7 @@ Example:
 Rules:
 
 - `account_scans` is optional.
-- Account keys use the same `provider:ACCOUNT_KEY` form already used by daily
+- Account keys use the same `provider:ACCOUNT_KEY` form used by daily
   summaries, for example `gmail:MAIN` or `yahoo:MAIN`.
 - If an account has no `account_scans` entry, it scans all allowed folders.
 - `folders` may be the string `"all"` or a non-empty array of folder names.
@@ -55,7 +56,7 @@ IMAP has awkward mailbox-name semantics. RFC 9051 says `INBOX` is
 case-insensitive, but it takes no position on case sensitivity for non-`INBOX`
 mailboxes; server implementations vary.
 
-The safest behavior should be:
+Implemented matching behavior:
 
 - Match `INBOX` case-insensitively.
 - Match all other configured folder names exactly against names returned by
@@ -93,7 +94,7 @@ Runtime account errors:
 - all configured folders are filtered out or unavailable, leaving no folder to
   scan.
 
-Recommended behavior:
+Implemented behavior:
 
 - Treat invalid top-level config as a startup configuration error and exit with
   code `2`, consistent with other config validation failures.
@@ -106,14 +107,11 @@ Recommended behavior:
 Example errors:
 
 ```text
-Folder scan config for gmail:MAIN references missing folder "Important".
-Available folders include: INBOX, [Gmail]/All Mail, [Gmail]/Important.
-Did you mean "[Gmail]/Important"?
+Folder scan config for gmail:MAIN references missing folder 'Important'. Available folders include: INBOX, [Gmail]/All Mail, [Gmail]/Important. Did you mean [Gmail]/Important?
 ```
 
 ```text
-Folder scan config for yahoo:MAIN selects only excluded folders: Spam, Trash.
-No folders will be scanned for this account.
+Folder scan config for yahoo:MAIN selects excluded folder(s): Spam, Trash. Excluded folders cannot be scanned.
 ```
 
 ## Reporting
@@ -121,7 +119,7 @@ No folders will be scanned for this account.
 Per-account run output should make the selected folder policy visible:
 
 ```text
-Folder scan mode: configured list (1 folder): INBOX
+Folder scan mode: configured list (1 folder): INBOX.
 Scanned 1 folder(s).
 ```
 
@@ -146,24 +144,23 @@ the unscanned folders. If the account later switches back to `"all"`, unread
 messages in those folders may be processed if their folder-local UIDs are not in
 state.
 
-## Implementation Plan
+## Implementation Summary
 
-1. Add an `AccountScanConfig` dataclass and an `account_scans` field to
+The implementation:
+
+1. Adds an `AccountScanConfig` dataclass and an `account_scans` field to
    `AppConfig`.
-2. Parse `account_scans` from `config.json`.
-3. Validate account references after accounts are resolved, because config
+2. Parses `account_scans` from `config.json`.
+3. Validates account references after accounts are resolved, because config
    validation needs the actual configured account set.
-4. Add a folder-selection helper that accepts discovered folders, account scan
-   config, and the quarantine folder name, then returns the final list of
-   folders to scan or a clear account-level error.
-5. Change `scan_new_messages` to accept a preselected folder list instead of
-   always calling `discover_folders` internally.
-6. Update run reporting to print folder scan mode and selected folders.
-7. Update `config.example.json`, `README.md`, and relevant tests.
+4. Selects folders after IMAP login and quarantine-folder setup.
+5. Passes the selected folder list into `scan_new_messages`.
+6. Prints the active folder scan mode in each account report.
+7. Records account-level folder-selection errors in daily summary history.
 
 ## Test Coverage
 
-Add focused tests for:
+Focused tests cover:
 
 - default config scans all allowed folders.
 - `folders: "all"` preserves current behavior.

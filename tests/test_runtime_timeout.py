@@ -113,6 +113,11 @@ def test_main_returns_timeout_exit_code_and_writes_state(
     monkeypatch.setattr(app, "ensure_mailbox_exists", lambda _imap, _folder: "Quarantine")
     monkeypatch.setattr(
         app,
+        "discover_folders",
+        lambda _imap: [app.FolderInfo(name="INBOX", flags=set())],
+    )
+    monkeypatch.setattr(
+        app,
         "scan_new_messages",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             app.RuntimeLimitExceeded("runtime limit reached during test")

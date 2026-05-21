@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import email
 import imaplib
 import json
@@ -224,11 +225,23 @@ class DailySummaryConfig:
 
 
 @dataclass(frozen=True)
+class AccountScanConfig:
+    folders: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     imap: IMAPConfig
     openai: OpenAIConfig
     daily_summary: DailySummaryConfig
+    account_scans: dict[str, AccountScanConfig]
     max_tracked_uids: int
+
+
+@dataclass(frozen=True)
+class FolderScanPlan:
+    mode: str
+    folders: tuple[FolderInfo, ...]
 
 
 @dataclass(frozen=True)
@@ -272,6 +285,10 @@ class DailySummaryRunRecord:
 
 class RuntimeLimitExceeded(RuntimeError):
     """Raised when the configured wall-clock runtime budget has been exceeded."""
+
+
+class AccountFolderSelectionError(RuntimeError):
+    """Raised when one account's configured scan folders cannot be selected."""
 
 
 def print_stderr(message: str) -> None:
@@ -892,6 +909,7 @@ def default_app_config() -> AppConfig:
             summary_time=DEFAULT_DAILY_SUMMARY_SEND_TIME,
             summary_interval_minutes=DEFAULT_DAILY_SUMMARY_INTERVAL_MINUTES,
         ),
+        account_scans={},
         max_tracked_uids=DEFAULT_MAX_TRACKED_UIDS,
     )
 
@@ -970,6 +988,88 @@ def parse_summary_sender_config(raw_value: object, source: str) -> str:
         raise ValueError(f"{source} provider must be one of: {supported}.")
     account_key = normalize_account_key(account_key_text, source)
     return account_state_key(provider, account_key)
+
+
+def parse_account_scan_key(raw_key: object, source: str) -> tuple[str, str, str]:
+    if not isinstance(raw_key, str):
+        raise ValueError(f"{source} keys must be strings in provider:ACCOUNT_KEY format.")
+    provider_text, separator_found, account_key_text = raw_key.partition(":")
+    if not separator_found:
+        raise ValueError(f"{source}.{raw_key} must use provider:ACCOUNT_KEY format.")
+    provider = provider_text.strip().lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        supported = ", ".join(SUPPORTED_PROVIDERS)
+        raise ValueError(f"{source}.{raw_key} provider must be one of: {supported}.")
+    account_key = normalize_account_key(account_key_text, f"{source}.{raw_key}")
+    return provider, account_key, account_state_key(provider, account_key)
+
+
+def parse_account_scan_folders(raw_value: object, source: str) -> tuple[str, ...] | None:
+    if raw_value == "all":
+        return None
+    if not isinstance(raw_value, list):
+        raise ValueError(f'{source} must be "all" or a non-empty array of folder names.')
+    if not raw_value:
+        raise ValueError(f"{source} cannot be an empty array.")
+
+    folders: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(raw_value):
+        if not isinstance(value, str):
+            raise ValueError(f"{source}[{index}] must be a non-empty string.")
+        folder_name = value.strip()
+        if not folder_name:
+            raise ValueError(f"{source}[{index}] must be a non-empty string.")
+        duplicate_key = "INBOX" if folder_name.casefold() == "inbox" else folder_name
+        if duplicate_key in seen:
+            raise ValueError(f"{source} contains duplicate folder {folder_name!r}.")
+        seen.add(duplicate_key)
+        folders.append(folder_name)
+    return tuple(folders)
+
+
+def parse_account_scans_config(raw_value: object, source: str) -> dict[str, AccountScanConfig]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{source} must be an object.")
+
+    account_scans: dict[str, AccountScanConfig] = {}
+    for raw_key, raw_config in raw_value.items():
+        _provider, _account_key, state_key = parse_account_scan_key(raw_key, source)
+        if state_key in account_scans:
+            raise ValueError(f"{source} contains duplicate account key {state_key!r}.")
+        if not isinstance(raw_config, dict):
+            raise ValueError(f"{source}.{raw_key} must be an object.")
+        if "folders" not in raw_config:
+            raise ValueError(f"{source}.{raw_key}.folders is required.")
+        account_scans[state_key] = AccountScanConfig(
+            folders=parse_account_scan_folders(
+                raw_config.get("folders"),
+                f"{source}.{raw_key}.folders",
+            )
+        )
+    return account_scans
+
+
+def validate_account_scan_references(
+    account_scans: dict[str, AccountScanConfig],
+    accounts: list[AccountCredentials],
+) -> None:
+    if not account_scans:
+        return
+
+    available = {account_state_key(account.provider, account.account_key) for account in accounts}
+    missing = sorted(set(account_scans) - available)
+    if not missing:
+        return
+
+    available_text = ", ".join(sorted(available)) or "none"
+    missing_text = ", ".join(missing)
+    raise ValueError(
+        "account_scans references account(s) that are not configured: "
+        f"{missing_text}. Available accounts: {available_text}."
+    )
 
 
 def parse_positive_number_config(raw_value: object, source: str, default: float) -> float:
@@ -1130,6 +1230,10 @@ def load_app_config(path: Path) -> AppConfig:
         imap=imap_config,
         openai=openai_config,
         daily_summary=daily_summary_config,
+        account_scans=parse_account_scans_config(
+            raw.get("account_scans"),
+            "account_scans",
+        ),
         max_tracked_uids=parse_positive_int_config(
             raw.get("max_tracked_uids"),
             "max_tracked_uids",
@@ -1748,6 +1852,99 @@ def discover_folders(imap: imaplib.IMAP4_SSL) -> list[FolderInfo]:
     return folders
 
 
+def format_folder_names(folder_names: Iterable[str], limit: int = 12) -> str:
+    names = list(folder_names)
+    if not names:
+        return "none"
+    if len(names) <= limit:
+        return ", ".join(names)
+    visible = ", ".join(names[:limit])
+    return f"{visible}, ... ({len(names) - limit} more)"
+
+
+def match_configured_folder(
+    discovered_folders: Iterable[FolderInfo],
+    configured_name: str,
+) -> FolderInfo | None:
+    for folder in discovered_folders:
+        if configured_name.casefold() == "inbox":
+            if folder.name.casefold() == "inbox":
+                return folder
+        elif folder.name == configured_name:
+            return folder
+    return None
+
+
+def folder_name_suggestions(
+    discovered_folders: Iterable[FolderInfo],
+    configured_name: str,
+    limit: int = 3,
+) -> tuple[str, ...]:
+    names = [folder.name for folder in discovered_folders]
+    case_matches = [
+        name for name in names if name.casefold() == configured_name.casefold() and name != configured_name
+    ]
+    if case_matches:
+        return tuple(case_matches[:limit])
+
+    close_matches = difflib.get_close_matches(configured_name, names, n=limit, cutoff=0.5)
+    return tuple(close_matches)
+
+
+def select_scan_folders(
+    account: AccountCredentials,
+    discovered_folders: list[FolderInfo],
+    account_scan_config: AccountScanConfig | None,
+    quarantine_folder: str,
+) -> FolderScanPlan:
+    account_label = account_state_key(account.provider, account.account_key)
+    available_names = [folder.name for folder in discovered_folders]
+
+    if account_scan_config is None or account_scan_config.folders is None:
+        selected_folders = tuple(
+            folder
+            for folder in discovered_folders
+            if not is_excluded_folder(folder, quarantine_folder=quarantine_folder)
+        )
+        if not selected_folders:
+            raise AccountFolderSelectionError(
+                f"Folder scan config for {account_label} left no allowed folders to scan. "
+                f"Available folders include: {format_folder_names(available_names)}."
+            )
+        return FolderScanPlan(mode="all", folders=selected_folders)
+
+    selected: list[FolderInfo] = []
+    excluded: list[str] = []
+    for configured_name in account_scan_config.folders:
+        folder = match_configured_folder(discovered_folders, configured_name)
+        if folder is None:
+            suggestions = folder_name_suggestions(discovered_folders, configured_name)
+            suggestion_text = ""
+            if suggestions:
+                suggestion_text = f" Did you mean {format_folder_names(suggestions)}?"
+            raise AccountFolderSelectionError(
+                f"Folder scan config for {account_label} references missing folder "
+                f"{configured_name!r}. Available folders include: "
+                f"{format_folder_names(available_names)}.{suggestion_text}"
+            )
+        if is_excluded_folder(folder, quarantine_folder=quarantine_folder):
+            excluded.append(folder.name)
+            continue
+        selected.append(folder)
+
+    if excluded:
+        raise AccountFolderSelectionError(
+            f"Folder scan config for {account_label} selects excluded folder(s): "
+            f"{format_folder_names(excluded)}. Excluded folders cannot be scanned."
+        )
+    if not selected:
+        raise AccountFolderSelectionError(
+            f"Folder scan config for {account_label} left no folders to scan."
+        )
+
+    return FolderScanPlan(mode="configured", folders=tuple(selected))
+
+
 def find_mailbox_name(imap: imaplib.IMAP4_SSL, folder_name: str) -> str | None:
     for folder in discover_folders(imap):
         if folder.name.casefold() == folder_name.casefold():
@@ -2262,11 +2459,13 @@ def scan_new_messages(
     openai_config: OpenAIConfig | None = None,
     openai_api_key: str | None = None,
     runtime_budget: RuntimeBudget | None = None,
+    folders_to_scan: Iterable[FolderInfo] | None = None,
 ) -> tuple[list[MessageSummary], dict[str, dict[str, object]], int]:
     messages: list[MessageSummary] = []
     scanned_folder_count = 0
+    scan_folders = list(folders_to_scan) if folders_to_scan is not None else discover_folders(imap)
 
-    for folder in discover_folders(imap):
+    for folder in scan_folders:
         if runtime_budget is not None:
             runtime_budget.ensure_within_limit(f"scan_new_messages.folder:{folder.name}")
         if is_excluded_folder(folder, quarantine_folder=quarantine_folder):
@@ -2848,6 +3047,17 @@ def send_daily_summary_email(
         smtp.send_message(message)
 
 
+def describe_folder_scan_plan(folder_scan_plan: FolderScanPlan) -> str:
+    if folder_scan_plan.mode == "configured":
+        folder_count = len(folder_scan_plan.folders)
+        folder_word = "folder" if folder_count == 1 else "folders"
+        return (
+            f"configured list ({folder_count} {folder_word}): "
+            f"{format_folder_names(folder.name for folder in folder_scan_plan.folders)}"
+        )
+    return "all allowed folders"
+
+
 def print_report(
     account: AccountCredentials,
     messages: list[MessageSummary],
@@ -2859,6 +3069,7 @@ def print_report(
     quarantine_will_be_created: bool,
     cleanup_result: QuarantineCleanupResult,
     openai_config: OpenAIConfig | None,
+    folder_scan_plan: FolderScanPlan | None = None,
     quarantine_folder_messages: int | None = None,
 ) -> None:
     protected_count = sum(1 for message in messages if message.never_filter_match)
@@ -2881,6 +3092,8 @@ def print_report(
 
     account_label = f"{account.provider}:{account.account_key}"
     print(f"Account {account_label}: {account.email}")
+    if folder_scan_plan is not None:
+        print(f"Folder scan mode: {describe_folder_scan_plan(folder_scan_plan)}.")
     print(f"Scanned {scanned_folder_count} folder(s).")
     print(f"Found {len(messages)} new unread message(s).")
     if dry_run:
@@ -3068,6 +3281,10 @@ def main() -> int:
         openai_api_key = resolve_openai_api_key(app_config.openai)
         scanner_rules = load_scanner_rules(rules_path)
         all_configured_accounts = resolve_accounts(accounts_path)
+        validate_account_scan_references(
+            app_config.account_scans,
+            all_configured_accounts,
+        )
         daily_summary_sender_account = resolve_daily_summary_sender_account(
             app_config.daily_summary,
             all_configured_accounts,
@@ -3169,9 +3386,33 @@ def main() -> int:
                             account_stats_recorded = True
                             continue
 
+                discovered_folders = discover_folders(imap)
+                try:
+                    folder_scan_plan = select_scan_folders(
+                        account=account,
+                        discovered_folders=discovered_folders,
+                        account_scan_config=app_config.account_scans.get(state_key),
+                        quarantine_folder=quarantine_folder,
+                    )
+                except AccountFolderSelectionError as error:
+                    print_stderr(f"[{account_label}] {error}")
+                    error_text = str(error)
+                    account_errors.append(
+                        f"{account_label} ({account.email}): {error_text}"
+                    )
+                    daily_summary_account_stats[state_key] = (
+                        build_empty_daily_summary_account_stats(
+                            account,
+                            errors=(error_text,),
+                        )
+                    )
+                    account_stats_recorded = True
+                    continue
+
                 messages, updated_state, scanned_count = scan_new_messages(
                     imap,
                     account=account,
+                    folders_to_scan=folder_scan_plan.folders,
                     folders_state=account_folders_state,
                     max_tracked_uids=effective_max_tracked_uids,
                     scanner_rules=scanner_rules,
@@ -3214,6 +3455,7 @@ def main() -> int:
                     quarantine_will_be_created=quarantine_will_be_created,
                     cleanup_result=cleanup_result,
                     openai_config=app_config.openai,
+                    folder_scan_plan=folder_scan_plan,
                     quarantine_folder_messages=quarantine_folder_messages,
                 )
         except RuntimeLimitExceeded as error:

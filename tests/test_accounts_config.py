@@ -222,3 +222,25 @@ def test_filter_accounts_reports_no_match_with_filters() -> None:
 
     with pytest.raises(ValueError, match="No accounts matched"):
         app.filter_accounts(accounts, provider_filter="gmail", account_key_filter="MAIN")
+
+
+def test_validate_account_scan_references_requires_configured_account() -> None:
+    accounts = [
+        app.AccountCredentials(
+            provider="gmail",
+            account_key="MAIN",
+            email="main@gmail.com",
+            app_password="gmail-app-password",
+        )
+    ]
+
+    app.validate_account_scan_references(
+        {"gmail:MAIN": app.AccountScanConfig(folders=("INBOX",))},
+        accounts,
+    )
+
+    with pytest.raises(ValueError, match="yahoo:MAIN"):
+        app.validate_account_scan_references(
+            {"yahoo:MAIN": app.AccountScanConfig(folders=("INBOX",))},
+            accounts,
+        )
