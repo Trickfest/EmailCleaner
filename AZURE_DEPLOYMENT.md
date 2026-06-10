@@ -12,11 +12,11 @@ exits.
 
 ## Deployed Shape
 
-The scripts create and manage these Azure resources:
+The app deployment scripts create and manage these Azure resources:
 
 | Resource | Purpose |
 | --- | --- |
-| Resource group | Holds the whole deployment so it can be managed or deleted together. |
+| App resource group | Holds EmailCleaner runtime resources so they can be managed or deleted together. A shared ACR can live in a separate resource group. |
 | Azure Container Apps environment | Runtime environment for the scheduled job. |
 | Azure Container Apps job | Runs EmailCleaner manually or on a cron schedule. |
 | Azure Container Registry | Private registry for the EmailCleaner container image. This can be app-specific or a shared registry in a separate resource group. |
@@ -249,6 +249,11 @@ deployed resources.
 not contain passwords or API keys, but it is still local machine configuration
 and should stay untracked.
 
+If you are using a shared registry, create it with the shared registry scripts
+before provisioning EmailCleaner, then edit `scripts/azure/env.local` so
+`AZURE_ACR_RESOURCE_GROUP` and `AZURE_ACR_NAME` point at that registry and
+`AZURE_CREATE_ACR` is `false`.
+
 ### 3. Create `scripts/azure/secrets.local`
 
 Create the local secret file:
@@ -311,7 +316,7 @@ EMAIL_CLEANER_GMAIL_APP_PASSWORD_2
 Before provisioning, confirm the local files are not tracked:
 
 ```bash
-git ls-files config.json rules.json accounts.json .email_cleaner_state.json scripts/azure/env.local scripts/azure/secrets.local
+git ls-files config.json rules.json accounts.json .email_cleaner_state.json scripts/azure/env.local scripts/azure/shared-acr.local scripts/azure/secrets.local
 ```
 
 Expected result: no output.
@@ -331,8 +336,9 @@ This script:
 3. Creates the resource group.
 4. Creates the Log Analytics workspace.
 5. Creates the Container Apps environment.
-6. Creates the private Azure Container Registry with admin access disabled, or
-   verifies the configured shared registry exists when `AZURE_CREATE_ACR=false`.
+6. Creates an app-specific private Azure Container Registry with admin access
+   disabled, or verifies the configured shared registry exists when
+   `AZURE_CREATE_ACR=false`.
 7. Creates the storage account and Azure Files share.
 8. Registers the Azure Files share as a Container Apps environment storage
    mount.
@@ -652,7 +658,9 @@ useful for confirming the same state:
 1. Open the Azure portal.
 2. Go to **Resource groups**.
 3. Open the EmailCleaner resource group, for example `rg-emailcleaner-prod`.
-4. Use the resource group overview as the inventory of deployed resources.
+4. Use the resource group overview as the inventory of app runtime resources.
+5. If `AZURE_CREATE_ACR=false`, also open the shared registry resource group to
+   inspect the Azure Container Registry.
 
 From there, these are the most useful places to check:
 
@@ -662,7 +670,7 @@ From there, these are the most useful places to check:
 | Container Apps job executions | Open recent executions and compare status, start time, end time, and duration. |
 | Log Analytics workspace, for example `law-emailcleaner-prod` | Query historical container logs after completed executions. |
 | Storage account, for example `stemcleaner...` | Inspect the `emailcleaner-data` file share and confirm runtime files exist. |
-| Azure Container Registry, app-specific or shared | Confirm the deployed image tag exists. |
+| Azure Container Registry, app-specific or shared | Confirm the deployed image tag exists. If the registry is shared, check it in the shared registry resource group. |
 | Access control (IAM) on the resource group | Confirm only intended Azure users can administer the deployment. |
 
 For historical logs in the portal:
@@ -740,7 +748,7 @@ Storage, Container Apps job executions, and possibly ACR. ACR Basic has an idle
 cost even when the scanner is not running. Use the shared ACR pattern when you
 operate multiple automation jobs and want only one registry bill.
 
-To delete the whole Azure deployment:
+To delete the EmailCleaner app deployment:
 
 ```bash
 scripts/azure/destroy.sh --confirm rg-emailcleaner-prod
@@ -788,5 +796,5 @@ Expected result after deletion: Azure reports `ResourceGroupNotFound`.
 | `scripts/azure/run-once.sh` | Starts one manual job execution. |
 | `scripts/azure/status.sh` | Shows account, resource, job, execution, and runtime-file status. |
 | `scripts/azure/logs.sh` | Reads completed logs from Log Analytics or follows live logs. |
-| `scripts/azure/destroy.sh` | Deletes the entire Azure resource group. |
+| `scripts/azure/destroy.sh` | Deletes the app deployment resource group. It does not delete a shared ACR in a separate resource group. |
 | `scripts/azure/render-job-yaml.py` | Internal helper used by `deploy.sh` to render Container Apps job YAML. |
