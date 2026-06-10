@@ -50,6 +50,8 @@ load_azure_env() {
     AZURE_FILE_SHARE
     AZURE_STORAGE_MOUNT_NAME
     AZURE_IMAGE_NAME
+    AZURE_ACR_RESOURCE_GROUP
+    AZURE_CREATE_ACR
     AZURE_SCAN_CRON
     AZURE_ACR_SKU
     AZURE_JOB_TRIGGER_TYPE
@@ -87,6 +89,8 @@ load_azure_env() {
   AZURE_FILE_SHARE="${AZURE_FILE_SHARE:-emailcleaner-data}"
   AZURE_STORAGE_MOUNT_NAME="${AZURE_STORAGE_MOUNT_NAME:-emailcleaner-data}"
   AZURE_IMAGE_NAME="${AZURE_IMAGE_NAME:-emailcleaner}"
+  AZURE_ACR_RESOURCE_GROUP="${AZURE_ACR_RESOURCE_GROUP:-${AZURE_RESOURCE_GROUP}}"
+  AZURE_CREATE_ACR="${AZURE_CREATE_ACR:-true}"
   AZURE_SCAN_CRON="${AZURE_SCAN_CRON:-*/15 * * * *}"
   AZURE_ACR_SKU="${AZURE_ACR_SKU:-Basic}"
   AZURE_JOB_TRIGGER_TYPE="${AZURE_JOB_TRIGGER_TYPE:-Manual}"
@@ -129,6 +133,8 @@ validate_azure_config() {
   [[ "$AZURE_JOB_NAME" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || fail "AZURE_JOB_NAME must be lowercase, start with a letter, end with alphanumeric, and be <32 chars."
   [[ "$AZURE_CONTAINERAPPS_ENV" =~ ^[a-z][a-z0-9-]*[a-z0-9]$ ]] || fail "AZURE_CONTAINERAPPS_ENV must be lowercase alphanumeric/hyphen."
   [[ "$AZURE_RESOURCE_GROUP" =~ ^[A-Za-z0-9._()/-]+$ ]] || fail "AZURE_RESOURCE_GROUP has invalid characters."
+  [[ "$AZURE_ACR_RESOURCE_GROUP" =~ ^[A-Za-z0-9._()/-]+$ ]] || fail "AZURE_ACR_RESOURCE_GROUP has invalid characters."
+  [[ "$AZURE_CREATE_ACR" =~ ^(true|false)$ ]] || fail "AZURE_CREATE_ACR must be true or false."
   [[ "$AZURE_JOB_TRIGGER_TYPE" =~ ^(Manual|Schedule)$ ]] || fail "AZURE_JOB_TRIGGER_TYPE must be Manual or Schedule."
   [[ "$AZURE_REPLICA_TIMEOUT" =~ ^[0-9]+$ ]] || fail "AZURE_REPLICA_TIMEOUT must be an integer."
   [[ "$AZURE_REPLICA_RETRY_LIMIT" =~ ^[0-9]+$ ]] || fail "AZURE_REPLICA_RETRY_LIMIT must be an integer."
@@ -232,6 +238,8 @@ Azure deployment configuration:
   container apps env:    ${AZURE_CONTAINERAPPS_ENV}
   job name:              ${AZURE_JOB_NAME}
   ACR:                   ${AZURE_ACR_NAME}
+  ACR resource group:    ${AZURE_ACR_RESOURCE_GROUP}
+  create ACR:            ${AZURE_CREATE_ACR}
   storage account:       ${AZURE_STORAGE_ACCOUNT}
   file share:            ${AZURE_FILE_SHARE}
   storage mount name:    ${AZURE_STORAGE_MOUNT_NAME}
@@ -248,6 +256,7 @@ export_azure_render_env() {
   export AZURE_CONTAINERAPPS_ENV
   export AZURE_JOB_NAME
   export AZURE_ACR_NAME
+  export AZURE_ACR_RESOURCE_GROUP
   export AZURE_STORAGE_MOUNT_NAME
   export AZURE_JOB_TRIGGER_TYPE
   export AZURE_SCAN_CRON

@@ -159,7 +159,7 @@ ensure_acr_pull() {
   [[ -n "$principal_id" && "$principal_id" != "null" ]] || fail "Container Apps job system-assigned identity is not available yet."
   acr_id="$(az acr show \
     --name "$AZURE_ACR_NAME" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --resource-group "$AZURE_ACR_RESOURCE_GROUP" \
     --query id \
     --output tsv)"
   assignment_count="$(az role assignment list \

@@ -25,6 +25,12 @@ For macOS background installation with LaunchDaemon, see
 For Azure deployment planning, see
 [`AZURE_DEPLOYMENT.md`](AZURE_DEPLOYMENT.md).
 
+EmailCleaner also includes optional Azure scripts for creating one shared Azure
+Container Registry that can serve multiple containerized automation jobs. This
+keeps each app's runtime resources separate while avoiding duplicate registry
+cost. See the shared registry section in
+[`AZURE_DEPLOYMENT.md`](AZURE_DEPLOYMENT.md).
+
 For per-account folder selection details, see
 [`FOLDER_SCAN_OPTIONS.md`](FOLDER_SCAN_OPTIONS.md).
 

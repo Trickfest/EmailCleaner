@@ -61,6 +61,7 @@ Azure deployment resource configuration:
   container apps env:    ${AZURE_CONTAINERAPPS_ENV}
   job name:              ${AZURE_JOB_NAME}
   ACR:                   ${AZURE_ACR_NAME}
+  ACR resource group:    ${AZURE_ACR_RESOURCE_GROUP}
   storage account:       ${AZURE_STORAGE_ACCOUNT}
   file share:            ${AZURE_FILE_SHARE}
   storage mount name:    ${AZURE_STORAGE_MOUNT_NAME}

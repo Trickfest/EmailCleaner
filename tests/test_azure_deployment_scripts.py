@@ -12,11 +12,14 @@ AZURE_DIR = REPO_ROOT / "scripts" / "azure"
 SHELL_SCRIPTS = [
     AZURE_DIR / "common.sh",
     AZURE_DIR / "init-env.sh",
+    AZURE_DIR / "init-shared-acr-env.sh",
+    AZURE_DIR / "provision-shared-acr.sh",
     AZURE_DIR / "provision.sh",
     AZURE_DIR / "deploy.sh",
     AZURE_DIR / "sync-runtime-files.sh",
     AZURE_DIR / "run-once.sh",
     AZURE_DIR / "status.sh",
+    AZURE_DIR / "status-shared-acr.sh",
     AZURE_DIR / "logs.sh",
     AZURE_DIR / "destroy.sh",
 ]
@@ -62,6 +65,11 @@ def test_provision_waits_for_provider_registration() -> None:
         assert f"az provider register --namespace {namespace} --wait" in text
 
 
+def test_shared_acr_provision_waits_for_provider_registration() -> None:
+    text = (AZURE_DIR / "provision-shared-acr.sh").read_text(encoding="utf-8")
+    assert "az provider register --namespace Microsoft.ContainerRegistry --wait" in text
+
+
 def test_dockerignore_limits_acr_build_context() -> None:
     patterns = [
         line.strip()
@@ -79,6 +87,19 @@ def test_dockerignore_limits_acr_build_context() -> None:
     assert "scripts/azure/env.local" not in patterns
 
 
+def test_azure_artifacts_use_public_friendly_names() -> None:
+    checked_files = [
+        AZURE_DIR / "common.sh",
+        AZURE_DIR / "init-env.sh",
+        AZURE_DIR / "init-shared-acr-env.sh",
+        AZURE_DIR / "shared-acr.example",
+        AZURE_DIR / "env.example",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in checked_files).lower()
+    for personal_fragment in ("mark", "harris", "mtharris", "trickfest"):
+        assert personal_fragment not in combined
+
+
 def test_deploy_bootstraps_identity_before_applying_private_acr_yaml() -> None:
     text = (AZURE_DIR / "deploy.sh").read_text(encoding="utf-8")
     bootstrap_index = text.index("Creating bootstrap Container Apps job")
@@ -88,6 +109,18 @@ def test_deploy_bootstraps_identity_before_applying_private_acr_yaml() -> None:
     assert "--mi-system-assigned \\" in text[create_index:acrpull_index]
     assert "--image \"$AZURE_BOOTSTRAP_IMAGE\"" in text[create_index:acrpull_index]
     assert update_index > acrpull_index
+
+
+def test_deploy_grants_acrpull_against_acr_resource_group() -> None:
+    text = (AZURE_DIR / "deploy.sh").read_text(encoding="utf-8")
+    assert '--resource-group "$AZURE_ACR_RESOURCE_GROUP"' in text
+
+
+def test_provision_can_use_existing_shared_acr() -> None:
+    text = (AZURE_DIR / "provision.sh").read_text(encoding="utf-8")
+    assert 'if [[ "$AZURE_CREATE_ACR" == "true" ]]' in text
+    assert "Using existing Azure Container Registry" in text
+    assert '--resource-group "$AZURE_ACR_RESOURCE_GROUP"' in text
 
 
 def test_init_env_generates_stable_unique_names(tmp_path: Path) -> None:
@@ -110,8 +143,32 @@ def test_init_env_generates_stable_unique_names(tmp_path: Path) -> None:
     suffix = suffix_match.group(1)
     assert f'AZURE_ACR_NAME="acremailcleaner{suffix}"' in text
     assert f'AZURE_STORAGE_ACCOUNT="stemcleaner{suffix}"' in text
+    assert 'AZURE_ACR_RESOURCE_GROUP="rg-emailcleaner-prod"' in text
+    assert 'AZURE_CREATE_ACR="true"' in text
     assert len(f"acremailcleaner{suffix}") <= 50
     assert len(f"stemcleaner{suffix}") <= 24
+
+
+def test_init_shared_acr_env_generates_generic_names(tmp_path: Path) -> None:
+    env_file = tmp_path / "shared-acr.local"
+
+    result = run_command(
+        [
+            str(AZURE_DIR / "init-shared-acr-env.sh"),
+            "--output",
+            str(env_file),
+            "--print",
+        ]
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert env_file.exists()
+    text = env_file.read_text(encoding="utf-8")
+    assert 'AZURE_ACR_RESOURCE_GROUP="rg-shared-container-registry-prod"' in text
+    assert re.search(r'AZURE_ACR_NAME="acrautomationjobs[0-9]{8}"', text)
+    assert "mtharris" not in text.lower()
+    assert "mark" not in text.lower()
+    assert "harris" not in text.lower()
 
 
 def test_deploy_render_yaml_only_is_safe_and_manual_by_default(tmp_path: Path) -> None:

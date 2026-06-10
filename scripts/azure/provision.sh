@@ -63,6 +63,14 @@ az group create \
   --location "$AZURE_LOCATION" \
   --output table
 
+if [[ "$AZURE_CREATE_ACR" == "true" && "$AZURE_ACR_RESOURCE_GROUP" != "$AZURE_RESOURCE_GROUP" ]]; then
+  info "Creating Azure Container Registry resource group."
+  az group create \
+    --name "$AZURE_ACR_RESOURCE_GROUP" \
+    --location "$AZURE_LOCATION" \
+    --output table
+fi
+
 info "Creating Log Analytics workspace."
 az monitor log-analytics workspace create \
   --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -90,13 +98,21 @@ az containerapp env create \
   --logs-workspace-key "$workspace_key" \
   --output table
 
-info "Creating Azure Container Registry."
-az acr create \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --name "$AZURE_ACR_NAME" \
-  --sku "$AZURE_ACR_SKU" \
-  --admin-enabled false \
-  --output table
+if [[ "$AZURE_CREATE_ACR" == "true" ]]; then
+  info "Creating Azure Container Registry."
+  az acr create \
+    --resource-group "$AZURE_ACR_RESOURCE_GROUP" \
+    --name "$AZURE_ACR_NAME" \
+    --sku "$AZURE_ACR_SKU" \
+    --admin-enabled false \
+    --output table
+else
+  info "Using existing Azure Container Registry."
+  az acr show \
+    --resource-group "$AZURE_ACR_RESOURCE_GROUP" \
+    --name "$AZURE_ACR_NAME" \
+    --output table
+fi
 
 info "Creating storage account and file share."
 az storage account create \

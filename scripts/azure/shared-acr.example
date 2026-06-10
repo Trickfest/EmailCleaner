@@ -1,0 +1,10 @@
+# Copy this file to scripts/azure/shared-acr.local, or run:
+#
+#   scripts/azure/init-shared-acr-env.sh
+#
+# This file contains nonsecret shared Azure Container Registry settings only.
+
+export AZURE_LOCATION="centralus"
+export AZURE_ACR_RESOURCE_GROUP="rg-shared-container-registry-prod"
+export AZURE_ACR_NAME="acrautomationjobs12345678"
+export AZURE_ACR_SKU="Basic"
