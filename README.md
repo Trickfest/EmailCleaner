@@ -446,7 +446,8 @@ Scanned 1 folder(s).
 
 ## Tests
 
-Install dev dependencies if needed, then run:
+Dev/test dependencies require Python 3.10 or newer. Install them if needed,
+then run:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
