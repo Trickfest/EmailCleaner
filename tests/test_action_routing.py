@@ -99,6 +99,40 @@ def test_count_mailbox_messages_reads_selected_mailbox_count(
     assert imap.selected == ('"Quarantine"', True)
 
 
+def test_ensure_mailbox_exists_accepts_already_exists_create_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AlreadyExistsIMAP:
+        create_calls: list[str]
+
+        def __init__(self) -> None:
+            self.create_calls = []
+
+        def create(self, mailbox: str):
+            self.create_calls.append(mailbox)
+            return "NO", [b'[ALREADYEXISTS] CREATE failed - Mailbox exists - "Quarantine"']
+
+    listed_mailboxes = iter([None, "Quarantine"])
+    monkeypatch.setattr(app, "find_mailbox_name", lambda *_args: next(listed_mailboxes))
+
+    imap = AlreadyExistsIMAP()
+
+    assert app.ensure_mailbox_exists(imap, "Quarantine") == "Quarantine"
+    assert imap.create_calls == ['"Quarantine"']
+
+
+def test_ensure_mailbox_exists_accepts_already_exists_when_listing_stays_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AlreadyExistsIMAP:
+        def create(self, _mailbox: str):
+            return "NO", [b"CREATE failed - mailbox already exists"]
+
+    monkeypatch.setattr(app, "find_mailbox_name", lambda *_args: None)
+
+    assert app.ensure_mailbox_exists(AlreadyExistsIMAP(), "Quarantine") == "Quarantine"
+
+
 def test_scan_dry_run_reports_would_quarantine(monkeypatch: pytest.MonkeyPatch) -> None:
     rules = make_scanner_rules(always_delete_senders={"sender@example.test"})
     patch_common_scan_dependencies(monkeypatch, summary_factory=make_summary)

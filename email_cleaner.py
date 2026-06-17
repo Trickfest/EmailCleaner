@@ -1971,6 +1971,15 @@ def decode_imap_response(data: object) -> str:
     return " | ".join(parts).strip()
 
 
+def is_mailbox_already_exists_response(detail: str) -> bool:
+    normalized = detail.casefold()
+    return (
+        "alreadyexists" in normalized
+        or "already exists" in normalized
+        or "mailbox exists" in normalized
+    )
+
+
 def ensure_mailbox_exists(imap: imaplib.IMAP4_SSL, folder_name: str) -> str:
     existing_mailbox = find_mailbox_name(imap, folder_name)
     if existing_mailbox:
@@ -1979,6 +1988,11 @@ def ensure_mailbox_exists(imap: imaplib.IMAP4_SSL, folder_name: str) -> str:
     status, data = imap.create(quote_mailbox_name(folder_name))
     if status != "OK":
         detail = decode_imap_response(data) or "unknown create failure"
+        if is_mailbox_already_exists_response(detail):
+            existing_mailbox = find_mailbox_name(imap, folder_name)
+            if existing_mailbox:
+                return existing_mailbox
+            return folder_name
         raise ValueError(f"Could not create mailbox {folder_name}: {detail}")
 
     existing_mailbox = find_mailbox_name(imap, folder_name)
