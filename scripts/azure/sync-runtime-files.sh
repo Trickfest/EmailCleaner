@@ -6,14 +6,13 @@ usage() {
 Upload EmailCleaner runtime files to the Azure Files share.
 
 Usage:
-  scripts/azure/sync-runtime-files.sh [--include-accounts] [--config PATH] [--rules PATH] [--accounts PATH]
+  scripts/azure/sync-runtime-files.sh --profile NAME [--include-accounts]
 
 Options:
+  --profile NAME      Required instance profile name.
+  --env-file PATH     Optional profile env override; the embedded profile name must match.
   --include-accounts  Also upload accounts.json. Use only if you intentionally
                       store account credentials in Azure Files.
-  --config PATH       Config file to upload. Default: repo config.json.
-  --rules PATH        Rules file to upload. Default: repo rules.json.
-  --accounts PATH     Accounts file to upload. Default: repo accounts.json.
   -h, --help          Show this help text.
 
 Notes:
@@ -28,30 +27,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 INCLUDE_ACCOUNTS="0"
-CONFIG_PATH=""
-RULES_PATH=""
-ACCOUNTS_PATH=""
+PROFILE=""
+CLI_ENV_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --profile)
+      [[ $# -ge 2 ]] || fail "--profile requires a value."
+      PROFILE="$2"
+      shift 2
+      ;;
+    --env-file)
+      [[ $# -ge 2 ]] || fail "--env-file requires a value."
+      CLI_ENV_FILE="$2"
+      shift 2
+      ;;
     --include-accounts)
       INCLUDE_ACCOUNTS="1"
       shift
-      ;;
-    --config)
-      [[ $# -ge 2 ]] || fail "--config requires a value."
-      CONFIG_PATH="$2"
-      shift 2
-      ;;
-    --rules)
-      [[ $# -ge 2 ]] || fail "--rules requires a value."
-      RULES_PATH="$2"
-      shift 2
-      ;;
-    --accounts)
-      [[ $# -ge 2 ]] || fail "--accounts requires a value."
-      ACCOUNTS_PATH="$2"
-      shift 2
       ;;
     -h|--help)
       usage
@@ -63,20 +56,24 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-load_azure_env
+[[ -n "$PROFILE" ]] || fail "--profile NAME is required."
+
+load_instance_profile "$PROFILE" "$CLI_ENV_FILE"
 require_persistent_resource_names
 validate_azure_config
 require_command az
 
-CONFIG_PATH="${CONFIG_PATH:-${AZURE_REPO_ROOT}/config.json}"
-RULES_PATH="${RULES_PATH:-${AZURE_REPO_ROOT}/rules.json}"
-ACCOUNTS_PATH="${ACCOUNTS_PATH:-${AZURE_REPO_ROOT}/accounts.json}"
+CONFIG_PATH="$AZURE_CONFIG_FILE"
+RULES_PATH="$AZURE_RULES_FILE"
+ACCOUNTS_PATH="$AZURE_ACCOUNTS_FILE"
 
 [[ -f "$CONFIG_PATH" ]] || fail "Missing config file: ${CONFIG_PATH}"
 [[ -f "$RULES_PATH" ]] || fail "Missing rules file: ${RULES_PATH}"
 if [[ "$INCLUDE_ACCOUNTS" == "1" ]]; then
   [[ -f "$ACCOUNTS_PATH" ]] || fail "Missing accounts file: ${ACCOUNTS_PATH}"
 fi
+
+print_config_summary
 
 storage_key="$(az storage account keys list \
   --resource-group "$AZURE_RESOURCE_GROUP" \

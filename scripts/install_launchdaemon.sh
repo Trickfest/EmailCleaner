@@ -290,6 +290,10 @@ info "Deploying code to ${INSTALL_DIR}."
 sudo rsync -a --delete \
   --exclude '.git/' \
   --exclude '.venv/' \
+  --exclude '.env' \
+  --exclude '.env.*' \
+  --exclude '*.local' \
+  --exclude 'instances/' \
   --exclude '__pycache__/' \
   --exclude '.pytest_cache/' \
   --exclude '*.log' \
@@ -298,6 +302,7 @@ sudo rsync -a --delete \
   --exclude 'config.json' \
   --exclude '.email_cleaner_state.json' \
   "${REPO_ROOT}/" "${INSTALL_DIR}/"
+sudo rm -rf -- "${INSTALL_DIR}/instances"
 sudo chown -R root:wheel "$INSTALL_DIR"
 sudo chmod -R a+rX "$INSTALL_DIR"
 

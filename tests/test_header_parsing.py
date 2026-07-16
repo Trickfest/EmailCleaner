@@ -109,8 +109,7 @@ def test_fetch_message_summary_uses_raw_header_values_for_non_from_fields(
                 ("Date", "Thu, 26 Mar 2026 14:44:00 -0400"),
                 (
                     "Message-ID",
-                    "<[aunu_4].NNKKM.X8EVWC5CI9OCZMYGQE5TCP2AZC5OTDRYQWAMIN"
-                    ".nkz1tsrz-8164-ykri-kwfj-xmhc2toiuymi@goodiesmail.com>",
+                    "<[fixture_4].MALFORMED.MESSAGE.ID@mailer.example.test>",
                 ),
                 ("Authentication-Results", "mx.yahoo.com; spf=fail"),
             ]
@@ -137,5 +136,5 @@ def test_fetch_message_summary_uses_raw_header_values_for_non_from_fields(
     assert summary.sender_email == "sender@example.test"
     assert summary.recipient == "dest@example.test"
     assert summary.subject == "Hello"
-    assert summary.message_id.startswith("<[aunu_4].NNKKM.")
+    assert summary.message_id.startswith("<[fixture_4].MALFORMED.")
     assert summary.authentication_results == ("mx.yahoo.com; spf=fail",)

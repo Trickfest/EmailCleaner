@@ -2,16 +2,36 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
 import email_cleaner as app
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def clear_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for env_name in list(os.environ):
         if env_name.startswith("EMAIL_CLEANER_YAHOO_") or env_name.startswith("EMAIL_CLEANER_GMAIL_"):
             monkeypatch.delenv(env_name, raising=False)
+
+
+def test_tracked_config_and_account_examples_use_matching_keys() -> None:
+    accounts_data = json.loads(
+        (REPO_ROOT / "accounts.example.json").read_text(encoding="utf-8")
+    )
+    config_data = json.loads(
+        (REPO_ROOT / "config.example.json").read_text(encoding="utf-8")
+    )
+    configured_accounts = {
+        *(f"gmail:{key}" for key in accounts_data["gmail_accounts"]),
+        *(f"yahoo:{key}" for key in accounts_data["yahoo_accounts"]),
+    }
+
+    assert set(config_data["account_scans"]) <= configured_accounts
+    assert config_data["daily_summary"]["summary_sender"] in configured_accounts
 
 
 def test_resolve_accounts_reads_yahoo_and_gmail_sections(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -22,13 +42,13 @@ def test_resolve_accounts_reads_yahoo_and_gmail_sections(tmp_path, monkeypatch: 
             {
                 "yahoo_accounts": {
                     "MAIN": {
-                        "email": "main@yahoo.com",
+                        "email": "main@yahoo.example",
                         "app_password": "yahoo-app-password",
                     }
                 },
                 "gmail_accounts": {
                     "MAIN": {
-                        "email": "main@gmail.com",
+                        "email": "main@gmail.example",
                         "app_password": "gmail-app-password",
                     }
                 },
@@ -41,14 +61,14 @@ def test_resolve_accounts_reads_yahoo_and_gmail_sections(tmp_path, monkeypatch: 
     actual = {(account.provider, account.account_key, account.email) for account in accounts}
 
     assert actual == {
-        ("yahoo", "MAIN", "main@yahoo.com"),
-        ("gmail", "MAIN", "main@gmail.com"),
+        ("yahoo", "MAIN", "main@yahoo.example"),
+        ("gmail", "MAIN", "main@gmail.example"),
     }
 
 
 def test_resolve_accounts_reads_gmail_from_env(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     clear_account_env(monkeypatch)
-    monkeypatch.setenv("EMAIL_CLEANER_GMAIL_EMAIL_MAIN", "main@gmail.com")
+    monkeypatch.setenv("EMAIL_CLEANER_GMAIL_EMAIL_MAIN", "main@gmail.example")
     monkeypatch.setenv("EMAIL_CLEANER_GMAIL_APP_PASSWORD_MAIN", "gmail-app-password")
 
     accounts = app.resolve_accounts(tmp_path / "does-not-exist.json")
@@ -56,12 +76,12 @@ def test_resolve_accounts_reads_gmail_from_env(tmp_path, monkeypatch: pytest.Mon
     assert len(accounts) == 1
     assert accounts[0].provider == "gmail"
     assert accounts[0].account_key == "MAIN"
-    assert accounts[0].email == "main@gmail.com"
+    assert accounts[0].email == "main@gmail.example"
 
 
 def test_resolve_accounts_reports_missing_field_with_provider(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     clear_account_env(monkeypatch)
-    monkeypatch.setenv("EMAIL_CLEANER_GMAIL_EMAIL_MAIN", "main@gmail.com")
+    monkeypatch.setenv("EMAIL_CLEANER_GMAIL_EMAIL_MAIN", "main@gmail.example")
 
     with pytest.raises(ValueError, match=r"gmail\.MAIN"):
         app.resolve_accounts(tmp_path / "does-not-exist.json")
@@ -73,7 +93,7 @@ def test_resolve_accounts_warns_when_env_and_file_match_exactly(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     clear_account_env(monkeypatch)
-    monkeypatch.setenv("EMAIL_CLEANER_YAHOO_EMAIL_1", "main@yahoo.com")
+    monkeypatch.setenv("EMAIL_CLEANER_YAHOO_EMAIL_1", "main@yahoo.example")
     monkeypatch.setenv("EMAIL_CLEANER_YAHOO_APP_PASSWORD_1", "shared-app-password")
     accounts_path = tmp_path / "accounts.json"
     accounts_path.write_text(
@@ -81,7 +101,7 @@ def test_resolve_accounts_warns_when_env_and_file_match_exactly(
             {
                 "yahoo_accounts": {
                     "1": {
-                        "email": "main@yahoo.com",
+                        "email": "main@yahoo.example",
                         "app_password": "shared-app-password",
                     }
                 }
@@ -96,7 +116,7 @@ def test_resolve_accounts_warns_when_env_and_file_match_exactly(
         app.AccountCredentials(
             provider="yahoo",
             account_key="1",
-            email="main@yahoo.com",
+            email="main@yahoo.example",
             app_password="shared-app-password",
         )
     ]
@@ -111,14 +131,14 @@ def test_resolve_accounts_still_fails_duplicate_field_when_not_exact_account_mat
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_account_env(monkeypatch)
-    monkeypatch.setenv("EMAIL_CLEANER_YAHOO_EMAIL_1", "main@yahoo.com")
+    monkeypatch.setenv("EMAIL_CLEANER_YAHOO_EMAIL_1", "main@yahoo.example")
     accounts_path = tmp_path / "accounts.json"
     accounts_path.write_text(
         json.dumps(
             {
                 "yahoo_accounts": {
                     "1": {
-                        "email": "main@yahoo.com",
+                        "email": "main@yahoo.example",
                         "app_password": "shared-app-password",
                     }
                 }
@@ -145,13 +165,13 @@ def test_save_state_namespaces_by_provider_and_account(tmp_path) -> None:
         app.AccountCredentials(
             provider="yahoo",
             account_key="MAIN",
-            email="main@yahoo.com",
+            email="main@yahoo.example",
             app_password="yahoo-app-password",
         ),
         app.AccountCredentials(
             provider="gmail",
             account_key="MAIN",
-            email="main@gmail.com",
+            email="main@gmail.example",
             app_password="gmail-app-password",
         ),
     ]
@@ -177,19 +197,19 @@ def test_filter_accounts_by_provider_and_account_key() -> None:
         app.AccountCredentials(
             provider="yahoo",
             account_key="MAIN",
-            email="main@yahoo.com",
+            email="main@yahoo.example",
             app_password="yahoo-app-password",
         ),
         app.AccountCredentials(
             provider="gmail",
             account_key="MAIN",
-            email="main@gmail.com",
+            email="main@gmail.example",
             app_password="gmail-app-password",
         ),
         app.AccountCredentials(
             provider="gmail",
             account_key="ALT",
-            email="alt@gmail.com",
+            email="alt@gmail.example",
             app_password="gmail-app-password-2",
         ),
     ]
@@ -215,7 +235,7 @@ def test_filter_accounts_reports_no_match_with_filters() -> None:
         app.AccountCredentials(
             provider="yahoo",
             account_key="MAIN",
-            email="main@yahoo.com",
+            email="main@yahoo.example",
             app_password="yahoo-app-password",
         )
     ]
@@ -229,7 +249,7 @@ def test_validate_account_scan_references_requires_configured_account() -> None:
         app.AccountCredentials(
             provider="gmail",
             account_key="MAIN",
-            email="main@gmail.com",
+            email="main@gmail.example",
             app_password="gmail-app-password",
         )
     ]

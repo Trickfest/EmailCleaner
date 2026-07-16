@@ -3,27 +3,26 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Build and deploy the EmailCleaner Azure Container Apps job.
+Deploy one EmailCleaner instance from an existing container image.
 
 Usage:
-  scripts/azure/deploy.sh [--env-file PATH] [--trigger manual|schedule] [--no-run]
-  scripts/azure/deploy.sh --render-yaml-only [--env-file PATH] [--output PATH] [--image IMAGE]
+  scripts/azure/deploy.sh --profile NAME --image IMAGE [--trigger manual|schedule] [--no-run]
+  scripts/azure/deploy.sh --profile NAME --image IMAGE --render-yaml-only [--output PATH]
 
 Options:
-  --env-file PATH     Nonsecret Azure settings file. Default: scripts/azure/env.local.
-  --trigger VALUE      Job trigger type: manual or schedule. Default: Manual.
+  --profile NAME      Required instance profile name.
+  --env-file PATH     Optional profile env override; the embedded profile name must match.
+  --trigger VALUE     Override the profile trigger type with manual or schedule.
   --no-run            Do not start a manual execution after deploy.
-  --image IMAGE       Override the image reference used in generated YAML.
-  --tag TAG           Image tag to build. Default: current git short SHA.
+  --image IMAGE       Required existing image reference to deploy.
   --render-yaml-only  Render safe YAML and exit without calling Azure.
   --output PATH       Output path for --render-yaml-only. Default: stdout.
   -h, --help          Show this help text.
 
 Notes:
   - This script mutates Azure unless --render-yaml-only is used.
-  - Images are built in Azure with az acr build; local Docker is not required.
-  - Secret values are read from scripts/azure/secrets.local and root
-    accounts.json, then applied to Container Apps secrets without printing.
+  - Build images separately with scripts/azure/build-image.sh.
+  - Secret values are read from the selected private instance profile.
 EOF
 }
 
@@ -34,13 +33,18 @@ source "${SCRIPT_DIR}/common.sh"
 RENDER_YAML_ONLY="0"
 OUTPUT_PATH=""
 IMAGE_OVERRIDE=""
-IMAGE_TAG=""
 NO_RUN="0"
 CLI_TRIGGER_TYPE=""
 CLI_ENV_FILE=""
+PROFILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --profile)
+      [[ $# -ge 2 ]] || fail "--profile requires a value."
+      PROFILE="$2"
+      shift 2
+      ;;
     --env-file)
       [[ $# -ge 2 ]] || fail "--env-file requires a value."
       CLI_ENV_FILE="$2"
@@ -64,11 +68,6 @@ while [[ $# -gt 0 ]]; do
       IMAGE_OVERRIDE="$2"
       shift 2
       ;;
-    --tag)
-      [[ $# -ge 2 ]] || fail "--tag requires a value."
-      IMAGE_TAG="$2"
-      shift 2
-      ;;
     --render-yaml-only)
       RENDER_YAML_ONLY="1"
       shift
@@ -88,18 +87,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-load_azure_env "$CLI_ENV_FILE"
+[[ -n "$PROFILE" ]] || fail "--profile NAME is required."
+[[ -n "$IMAGE_OVERRIDE" ]] || fail "--image IMAGE is required."
+
+load_instance_profile "$PROFILE" "$CLI_ENV_FILE"
 if [[ -n "$CLI_TRIGGER_TYPE" ]]; then
   AZURE_JOB_TRIGGER_TYPE="$CLI_TRIGGER_TYPE"
 fi
 validate_azure_config
 export_azure_render_env
 
-if [[ -n "$IMAGE_OVERRIDE" ]]; then
-  IMAGE="$IMAGE_OVERRIDE"
-else
-  IMAGE="$(emailcleaner_image_tag "$IMAGE_TAG")"
-fi
+IMAGE="$IMAGE_OVERRIDE"
 
 render_yaml() {
   python3 "${SCRIPT_DIR}/render-job-yaml.py" --image "$IMAGE" "$@"
@@ -125,12 +123,7 @@ AZURE_SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:-$(az account show --query id --o
 export AZURE_SUBSCRIPTION_ID
 
 print_config_summary
-info "Building image in Azure Container Registry: ${IMAGE}"
-az acr build \
-  --registry "$AZURE_ACR_NAME" \
-  --image "${AZURE_IMAGE_NAME}:${IMAGE##*:}" \
-  --file "${AZURE_REPO_ROOT}/Dockerfile" \
-  "$AZURE_REPO_ROOT"
+info "Deploying existing image: ${IMAGE}"
 
 tmp_yaml="$(mktemp)"
 chmod 600 "$tmp_yaml"

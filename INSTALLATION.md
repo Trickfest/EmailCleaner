@@ -11,6 +11,12 @@ operations, status checks, log rotation, and uninstall steps:
 
 Use this if you want EmailCleaner to run automatically as a system background task on macOS.
 
+This is deliberately a single-instance installation path. Profile-based Azure
+deployments use `instances/NAME.local/` and are documented in
+[`AZURE_DEPLOYMENT.md`](AZURE_DEPLOYMENT.md). Do not schedule the same email
+accounts in Azure and a macOS LaunchDaemon at the same time; choose one
+production scheduler for each account set.
+
 ## What You Get
 
 - Code installed to `/usr/local/libexec/EmailCleaner`
@@ -41,6 +47,10 @@ does not depend on a custom log subdirectory existing after boot or update.
    - `rules.json`
    - `config.json`
    - `accounts.json` (or env vars to generate it)
+
+The repo-root files are installer staging inputs, not an implicit Azure profile.
+If the canonical private files live in `instances/NAME.local/`, stage that one
+profile explicitly as described below.
 
 Supported env var format for account generation:
 
@@ -83,6 +93,32 @@ counts for the report window.
 Summary send attempts are logged in the same stdout/stderr files as scanner
 runs. A successful send prints `Daily summary email sent...`; SMTP or
 configuration failures are written to stderr and cause a non-zero run exit.
+
+## Stage One Private Profile For macOS
+
+The current LaunchDaemon installer reads repo-root runtime JSON files. To use an
+existing profile without changing the installer, copy only the selected
+profile's files into the ignored repo-root staging locations:
+
+```bash
+PROFILE="example"
+cp "instances/${PROFILE}.local/rules.json" rules.json
+cp "instances/${PROFILE}.local/config.json" config.json
+cp "instances/${PROFILE}.local/accounts.json" accounts.json
+chmod 600 rules.json config.json accounts.json
+```
+
+If OpenAI is enabled, load that profile's integration secret before running the
+installer:
+
+```bash
+source "instances/${PROFILE}.local/secrets.env"
+```
+
+The installer does not read `azure.env`, does not use Azure Files state, and
+does not update the selected Azure job. Repo-root staging files are ignored by
+Git and may be removed after installation unless they are needed for a later
+`--overwrite-*` update.
 
 ## Option A: One-Shot Installer Script
 
@@ -272,6 +308,10 @@ This copies the repo into the install directory, excluding local secrets/state.
 sudo rsync -a --delete \
   --exclude '.git/' \
   --exclude '.venv/' \
+  --exclude '.env' \
+  --exclude '.env.*' \
+  --exclude '*.local' \
+  --exclude 'instances/' \
   --exclude '__pycache__/' \
   --exclude '.pytest_cache/' \
   --exclude '*.log' \
@@ -281,6 +321,8 @@ sudo rsync -a --delete \
   --exclude '.email_cleaner_state.json' \
   "${REPO_ROOT}/" "${EC_INSTALL_DIR}/"
 
+# Remove a private profile tree copied by an older installer run, if present.
+sudo rm -rf -- "${EC_INSTALL_DIR}/instances"
 sudo chown -R root:wheel "$EC_INSTALL_DIR"
 sudo chmod -R a+rX "$EC_INSTALL_DIR"
 ```
@@ -566,6 +608,11 @@ cd /path/to/repo
   --interval 15 \
   --overwrite-config
 ```
+
+When `instances/NAME.local/` is the canonical source, repeat the staging copy
+from **Stage One Private Profile For macOS** before using an overwrite flag.
+Confirm that the profile is the intended one; the installer itself has no
+profile selector.
 
 If you installed manually, re-run manual steps:
 

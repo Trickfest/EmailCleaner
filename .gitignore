@@ -13,6 +13,7 @@ env/
 .env
 .env.*
 *.local
+/instances/*.local/
 rules.json
 accounts.json
 accounts.config

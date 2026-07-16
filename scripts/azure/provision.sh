@@ -6,15 +6,17 @@ usage() {
 Provision Azure resources for EmailCleaner.
 
 Usage:
-  scripts/azure/provision.sh [--skip-runtime-upload]
+  scripts/azure/provision.sh --profile NAME [--skip-runtime-upload]
 
 Options:
+  --profile NAME         Required instance profile name.
+  --env-file PATH        Optional profile env override; the embedded profile name must match.
   --skip-runtime-upload  Create infrastructure only; do not upload config/rules/state.
   -h, --help             Show this help text.
 
 Notes:
   - This script mutates Azure. Do not run it during local-only implementation.
-  - Run scripts/azure/init-env.sh first if scripts/azure/env.local does not exist.
+  - The profile controls whether shared infrastructure is created or only verified.
   - Secrets are applied by scripts/azure/deploy.sh, not by this script.
 EOF
 }
@@ -24,9 +26,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 SKIP_RUNTIME_UPLOAD="0"
+PROFILE=""
+CLI_ENV_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --profile)
+      [[ $# -ge 2 ]] || fail "--profile requires a value."
+      PROFILE="$2"
+      shift 2
+      ;;
+    --env-file)
+      [[ $# -ge 2 ]] || fail "--env-file requires a value."
+      CLI_ENV_FILE="$2"
+      shift 2
+      ;;
     --skip-runtime-upload)
       SKIP_RUNTIME_UPLOAD="1"
       shift
@@ -41,7 +55,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-load_azure_env
+[[ -n "$PROFILE" ]] || fail "--profile NAME is required."
+
+load_instance_profile "$PROFILE" "$CLI_ENV_FILE"
 require_persistent_resource_names
 validate_azure_config
 require_command az
@@ -57,72 +73,96 @@ az provider register --namespace Microsoft.OperationalInsights --wait
 az provider register --namespace Microsoft.Storage --wait
 az provider register --namespace Microsoft.ContainerRegistry --wait
 
-info "Creating resource group."
-az group create \
-  --name "$AZURE_RESOURCE_GROUP" \
-  --location "$AZURE_LOCATION" \
-  --output table
-
-if [[ "$AZURE_CREATE_ACR" == "true" && "$AZURE_ACR_RESOURCE_GROUP" != "$AZURE_RESOURCE_GROUP" ]]; then
-  info "Creating Azure Container Registry resource group."
+if [[ "$AZURE_PROVISION_SHARED_INFRASTRUCTURE" == "true" ]]; then
+  info "Creating resource group."
   az group create \
-    --name "$AZURE_ACR_RESOURCE_GROUP" \
+    --name "$AZURE_RESOURCE_GROUP" \
     --location "$AZURE_LOCATION" \
     --output table
-fi
 
-info "Creating Log Analytics workspace."
-az monitor log-analytics workspace create \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --workspace-name "$AZURE_LOG_WORKSPACE" \
-  --location "$AZURE_LOCATION" \
-  --output table
+  if [[ "$AZURE_CREATE_ACR" == "true" && "$AZURE_ACR_RESOURCE_GROUP" != "$AZURE_RESOURCE_GROUP" ]]; then
+    info "Creating Azure Container Registry resource group."
+    az group create \
+      --name "$AZURE_ACR_RESOURCE_GROUP" \
+      --location "$AZURE_LOCATION" \
+      --output table
+  fi
 
-workspace_id="$(az monitor log-analytics workspace show \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --workspace-name "$AZURE_LOG_WORKSPACE" \
-  --query customerId \
-  --output tsv)"
-workspace_key="$(az monitor log-analytics workspace get-shared-keys \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --workspace-name "$AZURE_LOG_WORKSPACE" \
-  --query primarySharedKey \
-  --output tsv)"
+  info "Creating Log Analytics workspace."
+  az monitor log-analytics workspace create \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --workspace-name "$AZURE_LOG_WORKSPACE" \
+    --location "$AZURE_LOCATION" \
+    --output table
 
-info "Creating Container Apps environment."
-az containerapp env create \
-  --name "$AZURE_CONTAINERAPPS_ENV" \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --location "$AZURE_LOCATION" \
-  --logs-workspace-id "$workspace_id" \
-  --logs-workspace-key "$workspace_key" \
-  --output table
+  workspace_id="$(az monitor log-analytics workspace show \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --workspace-name "$AZURE_LOG_WORKSPACE" \
+    --query customerId \
+    --output tsv)"
+  workspace_key="$(az monitor log-analytics workspace get-shared-keys \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --workspace-name "$AZURE_LOG_WORKSPACE" \
+    --query primarySharedKey \
+    --output tsv)"
 
-if [[ "$AZURE_CREATE_ACR" == "true" ]]; then
-  info "Creating Azure Container Registry."
-  az acr create \
-    --resource-group "$AZURE_ACR_RESOURCE_GROUP" \
-    --name "$AZURE_ACR_NAME" \
-    --sku "$AZURE_ACR_SKU" \
-    --admin-enabled false \
+  info "Creating Container Apps environment."
+  az containerapp env create \
+    --name "$AZURE_CONTAINERAPPS_ENV" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --location "$AZURE_LOCATION" \
+    --logs-workspace-id "$workspace_id" \
+    --logs-workspace-key "$workspace_key" \
+    --output table
+
+  if [[ "$AZURE_CREATE_ACR" == "true" ]]; then
+    info "Creating Azure Container Registry."
+    az acr create \
+      --resource-group "$AZURE_ACR_RESOURCE_GROUP" \
+      --name "$AZURE_ACR_NAME" \
+      --sku "$AZURE_ACR_SKU" \
+      --admin-enabled false \
+      --output table
+  else
+    info "Using existing Azure Container Registry."
+    az acr show \
+      --resource-group "$AZURE_ACR_RESOURCE_GROUP" \
+      --name "$AZURE_ACR_NAME" \
+      --output table
+  fi
+
+  info "Creating storage account."
+  az storage account create \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$AZURE_STORAGE_ACCOUNT" \
+    --location "$AZURE_LOCATION" \
+    --sku Standard_LRS \
+    --kind StorageV2 \
     --output table
 else
-  info "Using existing Azure Container Registry."
+  info "Verifying shared Azure infrastructure."
+  az group show \
+    --name "$AZURE_RESOURCE_GROUP" \
+    --output table
+  az monitor log-analytics workspace show \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --workspace-name "$AZURE_LOG_WORKSPACE" \
+    --output table
+  az containerapp env show \
+    --name "$AZURE_CONTAINERAPPS_ENV" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --output table
   az acr show \
     --resource-group "$AZURE_ACR_RESOURCE_GROUP" \
     --name "$AZURE_ACR_NAME" \
     --output table
+  az storage account show \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$AZURE_STORAGE_ACCOUNT" \
+    --output table
 fi
 
-info "Creating storage account and file share."
-az storage account create \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --name "$AZURE_STORAGE_ACCOUNT" \
-  --location "$AZURE_LOCATION" \
-  --sku Standard_LRS \
-  --kind StorageV2 \
-  --output table
-
+info "Creating instance Azure Files share."
 az storage share-rm create \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --storage-account "$AZURE_STORAGE_ACCOUNT" \
@@ -149,7 +189,11 @@ az containerapp env storage set \
 
 if [[ "$SKIP_RUNTIME_UPLOAD" == "0" ]]; then
   info "Uploading initial runtime files."
-  "${SCRIPT_DIR}/sync-runtime-files.sh"
+  sync_args=(--profile "$PROFILE")
+  if [[ -n "$CLI_ENV_FILE" ]]; then
+    sync_args+=(--env-file "$CLI_ENV_FILE")
+  fi
+  "${SCRIPT_DIR}/sync-runtime-files.sh" "${sync_args[@]}"
 else
   info "Skipping runtime file upload."
 fi

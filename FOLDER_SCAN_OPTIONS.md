@@ -11,7 +11,7 @@ either:
 - scan all allowed folders, or
 - scan only an explicit list of folders.
 
-The immediate motivation is Gmail. Gmail exposes one underlying message through
+The primary motivation is Gmail. Gmail exposes one underlying message through
 multiple IMAP mailboxes such as `INBOX`, `[Gmail]/All Mail`, and
 `[Gmail]/Important`. Scanning every allowed mailbox can therefore make one
 visible Inbox message appear as multiple newly processed messages. Configuring a
@@ -22,6 +22,10 @@ Gmail account to scan only `INBOX` avoids that duplicate folder exposure.
 Put folder scan settings in `config.json`, not `accounts.json`. Folder selection
 is non-secret runtime behavior, and Azure supplies account credentials through
 secrets/env vars rather than uploading `accounts.json`.
+
+For standalone/macOS use, that file is repo-root `config.json`. For Azure, edit
+`instances/NAME.local/config.json`, then upload it with
+`scripts/azure/sync-runtime-files.sh --profile NAME`.
 
 Example:
 
@@ -71,7 +75,7 @@ Source: [RFC 9051, section 5.1 mailbox naming](https://www.rfc-editor.org/rfc/rf
 
 ## Validation And Error Handling
 
-Configuration validation should be strict enough to catch common mistakes before
+Configuration validation is strict enough to catch common mistakes before
 messages are moved.
 
 Configuration errors:
@@ -116,7 +120,7 @@ Folder scan config for yahoo:MAIN selects excluded folder(s): Spam, Trash. Exclu
 
 ## Reporting
 
-Per-account run output should make the selected folder policy visible:
+Per-account run output makes the selected folder policy visible:
 
 ```text
 Folder scan mode: configured list (1 folder): INBOX.
@@ -130,14 +134,14 @@ Folder scan mode: all allowed folders.
 Scanned 9 folder(s).
 ```
 
-Daily summary does not need new fields initially. Existing `scanned_folders`,
-messages processed, and errors are enough. If folder misconfiguration becomes a
-common support case, add a compact account error line to the daily summary.
+Daily summaries use the existing `scanned_folders`, messages-processed, and
+error fields. Folder-selection failures are recorded as account errors; there
+is no separate folder-policy field in the summary.
 
 ## State Behavior
 
-No state migration should be required. State is already namespaced by provider,
-account key, and folder.
+No state migration is required. State is namespaced by provider, account key,
+and folder.
 
 Changing an account from `"all"` to `["INBOX"]` simply stops updating state for
 the unscanned folders. If the account later switches back to `"all"`, unread
@@ -173,13 +177,11 @@ Focused tests cover:
 - unknown account reference is a config error.
 - daily summary records account-level folder-selection errors.
 
-## Deferred Decisions
+## Current Scope Boundaries
 
-- Whether to add provider defaults later, such as Gmail `INBOX` only by default.
-  This design keeps the current all-folders default unless explicitly
-  configured.
-- Whether to add glob/pattern support. Do not include it in the first
-  implementation; exact lists are easier to reason about and safer for mailbox
-  mutations.
-- Whether to expose folder selection through environment variables. The first
-  implementation should use `config.json` only.
+- There are no provider-specific defaults. Every account scans all allowed
+  folders unless `config.json` explicitly selects folders.
+- Folder glob and pattern matching are not supported. Exact lists are easier to
+  reason about and safer for mailbox mutations.
+- Folder selection is configured only in `config.json`; there is no environment
+  variable equivalent.

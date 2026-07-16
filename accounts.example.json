@@ -1,22 +1,14 @@
 {
   "yahoo_accounts": {
-    "JOHN": {
+    "MAIN": {
       "email": "john@yahoo.example",
       "app_password": "john_generated_app_password"
-    },
-    "SALLY": {
-      "email": "sally@yahoo.example",
-      "app_password": "sally_generated_app_password"
     }
   },
   "gmail_accounts": {
-    "JANE": {
+    "MAIN": {
       "email": "jane@gmail.example",
       "app_password": "jane_generated_app_password"
-    },
-    "ROB": {
-      "email": "rob@gmail.example",
-      "app_password": "rob_generated_app_password"
     }
   }
 }

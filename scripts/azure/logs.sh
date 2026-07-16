@@ -6,9 +6,11 @@ usage() {
 Show recent EmailCleaner Azure Container Apps job logs.
 
 Usage:
-  scripts/azure/logs.sh [--execution NAME] [--replica NAME] [--tail N] [--follow]
+  scripts/azure/logs.sh --profile NAME [--execution NAME] [--replica NAME] [--tail N] [--follow]
 
 Options:
+  --profile NAME    Required instance profile name.
+  --env-file PATH   Optional profile env override; the embedded profile name must match.
   --execution NAME  Job execution to show. Default: latest execution.
   --replica NAME    Replica to show. Default: first replica for the execution.
   --tail N    Number of recent log lines to show. Default: 300.
@@ -32,9 +34,21 @@ TAIL_LINES="300"
 FOLLOW="0"
 EXECUTION_NAME=""
 REPLICA_NAME=""
+PROFILE=""
+CLI_ENV_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --profile)
+      [[ $# -ge 2 ]] || fail "--profile requires a value."
+      PROFILE="$2"
+      shift 2
+      ;;
+    --env-file)
+      [[ $# -ge 2 ]] || fail "--env-file requires a value."
+      CLI_ENV_FILE="$2"
+      shift 2
+      ;;
     --execution)
       [[ $# -ge 2 ]] || fail "--execution requires a value."
       EXECUTION_NAME="$2"
@@ -67,7 +81,9 @@ done
 [[ "$TAIL_LINES" =~ ^[0-9]+$ ]] || fail "--tail must be an integer."
 (( TAIL_LINES <= 300 )) || fail "--tail must be <= 300."
 
-load_azure_env
+[[ -n "$PROFILE" ]] || fail "--profile NAME is required."
+
+load_instance_profile "$PROFILE" "$CLI_ENV_FILE"
 require_persistent_resource_names
 validate_azure_config
 require_command az

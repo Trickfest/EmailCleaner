@@ -18,6 +18,9 @@ EmailCleaner is a Python IMAP scanner that currently supports Yahoo Mail and Gma
 - `rules.example.json`: safe template for rules
 - `accounts.example.json`: safe template for account configuration
 - `config.example.json`: safe template for optional OpenAI settings
+- `AZURE_DEPLOYMENT.md`: profile-based Azure provisioning and operations
+- `instances/README.md`: private profile layout and file ownership boundaries
+- `INSTALLATION.md`: single-instance macOS LaunchDaemon workflow
 
 ## Privacy And Data Rules
 - Never commit personal/local data files:
@@ -25,7 +28,9 @@ EmailCleaner is a Python IMAP scanner that currently supports Yahoo Mail and Gma
   - `accounts.json`
   - `config.json`
   - `.email_cleaner_state.json`
-- Keep examples in `rules.example.json` and `accounts.example.json` fictional/sanitized.
+  - anything under `instances/*.local/`
+- Keep examples in `rules.example.json`, `accounts.example.json`, and
+  `config.example.json` fictional/sanitized.
 - If docs need examples, use fictional values only.
 
 ## Behavioral Invariants
@@ -84,10 +89,13 @@ Before finalizing changes:
 - Check CLI help for new flags: `python3 email_cleaner.py --help`
 - Prefer safe validation paths (`--dry-run`, temp state files) over live mailbox mutation.
 - When changing daemon/runtime behavior, keep `INSTALLATION.md` and generated launcher behavior aligned with the installed runtime.
-- Production `rules.json`, `config.json`, and `accounts.json` may be mirrored into the repo for local reference, but must remain untracked and uncommitted.
-- Tests must not depend on local untracked runtime files such as `config.json`,
-  `rules.json`, `accounts.json`, or `.email_cleaner_state.json`; use temp paths
-  or explicit fixtures when testing `main()`.
+- Production Azure files belong in ignored `instances/NAME.local/` directories
+  with standard filenames. Repo-root runtime files remain valid only for
+  standalone commands and macOS LaunchDaemon staging. Neither layout may be
+  tracked or committed.
+- Tests must not depend on local untracked runtime files in repo root or
+  `instances/*.local/`; use temp paths or explicit fixtures when testing
+  `main()`.
 - When docs include example runtime output, especially email bodies or CLI output,
   keep the example aligned with the actual formatter and add or update a focused
   test when practical.
@@ -103,6 +111,8 @@ Anti-regression checklist:
 - OpenAI failures default to keep, and threshold gating is still enforced.
 - `--hard-delete` behavior remains no-op placeholder for delete candidates.
 - `README.md`, `rules.example.json`, and `config.example.json` remain aligned with runtime behavior.
+- Azure instance scripts require an explicit `--profile`; there is no silent
+  default profile.
 
 ## Style
 - Keep implementation in Python stdlib unless explicitly approved.

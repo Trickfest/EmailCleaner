@@ -16,7 +16,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email import policy
@@ -2460,6 +2460,55 @@ def count_mailbox_messages(imap: imaplib.IMAP4_SSL, folder_name: str) -> int | N
         return None
 
 
+def refresh_daily_summary_quarantine_counts(
+    accounts: list[AccountCredentials],
+    account_stats: dict[str, DailySummaryAccountStats],
+    host_override: str,
+    port: int,
+    context: ssl.SSLContext,
+    timeout_seconds: float,
+) -> dict[str, DailySummaryAccountStats]:
+    refreshed_stats = dict(account_stats)
+    for account in accounts:
+        state_key = account_state_key(account.provider, account.account_key)
+        stats = refreshed_stats.get(state_key)
+        if stats is None:
+            continue
+
+        try:
+            imap_host = resolve_imap_host(account.provider, host_override)
+            with imaplib.IMAP4_SSL(
+                imap_host,
+                port,
+                ssl_context=context,
+                timeout=timeout_seconds,
+            ) as imap:
+                imap.login(account.email, account.app_password)
+                message_count = count_mailbox_messages(imap, DEFAULT_QUARANTINE_FOLDER)
+            if message_count is None:
+                raise ValueError("mailbox is unavailable or could not be counted")
+        except (imaplib.IMAP4.error, OSError, ValueError) as error:
+            error_text = f"final Quarantine count refresh failed: {error}"
+            print_stderr(f"[{state_key}] {error_text}")
+            refreshed_stats[state_key] = replace(
+                stats,
+                quarantine_folder_messages=None,
+                errors=stats.errors + (error_text,),
+            )
+            continue
+
+        refreshed_stats[state_key] = replace(
+            stats,
+            quarantine_folder_messages=message_count,
+        )
+        print(
+            f"Final Quarantine folder count for {state_key}: "
+            f"{message_count} message(s)."
+        )
+
+    return refreshed_stats
+
+
 def scan_new_messages(
     imap: imaplib.IMAP4_SSL,
     account: AccountCredentials,
@@ -3519,6 +3568,30 @@ def main() -> int:
         run_status = "success"
         run_exit_code = 0
 
+    daily_summary_now: datetime | None = None
+    daily_summary_due = False
+    if (
+        app_config.daily_summary.enabled
+        and not args.dry_run
+        and not timeout_reason
+        and daily_summary_sender_account is not None
+    ):
+        daily_summary_now = datetime.now().astimezone()
+        daily_summary_due = is_daily_summary_due(
+            app_config.daily_summary,
+            daily_summary_state,
+            daily_summary_now,
+        )
+        if daily_summary_due and not args.hard_delete:
+            daily_summary_account_stats = refresh_daily_summary_quarantine_counts(
+                accounts=all_configured_accounts,
+                account_stats=daily_summary_account_stats,
+                host_override=host_override,
+                port=args.port,
+                context=context,
+                timeout_seconds=app_config.imap.timeout_seconds,
+            )
+
     if app_config.daily_summary.enabled and not args.dry_run:
         append_daily_summary_run_record(
             daily_summary_state,
@@ -3549,51 +3622,48 @@ def main() -> int:
             return 1
 
     daily_summary_error = ""
-    if (
-        app_config.daily_summary.enabled
-        and not args.dry_run
-        and not timeout_reason
-        and daily_summary_sender_account is not None
-    ):
-        summary_now = datetime.now().astimezone()
-        if is_daily_summary_due(app_config.daily_summary, daily_summary_state, summary_now):
-            try:
-                send_daily_summary_email(
-                    daily_summary_config=app_config.daily_summary,
-                    sender_account=daily_summary_sender_account,
-                    accounts=all_configured_accounts,
-                    daily_summary_state=daily_summary_state,
-                    now=summary_now,
-                )
-                daily_summary_state["last_sent_at"] = summary_now.isoformat(timespec="seconds")
-                daily_summary_state["last_sent_local_date"] = summary_now.date().isoformat()
-                print(
-                    "Daily summary email sent to "
-                    f"{', '.join(app_config.daily_summary.summary_recipients)}."
-                )
-            except (OSError, smtplib.SMTPException, ValueError) as error:
-                daily_summary_error = f"Daily summary email failed: {error}"
-                print_stderr(daily_summary_error)
-                raw_records = daily_summary_state.get("run_records", [])
-                if isinstance(raw_records, list) and raw_records:
-                    latest_record = raw_records[-1]
-                    if isinstance(latest_record, dict):
-                        latest_errors = latest_record.get("errors", [])
-                        if not isinstance(latest_errors, list):
-                            latest_errors = []
-                        latest_errors.append(daily_summary_error)
-                        latest_record["errors"] = latest_errors
+    if daily_summary_due and daily_summary_now is not None:
+        try:
+            send_daily_summary_email(
+                daily_summary_config=app_config.daily_summary,
+                sender_account=daily_summary_sender_account,
+                accounts=all_configured_accounts,
+                daily_summary_state=daily_summary_state,
+                now=daily_summary_now,
+            )
+            daily_summary_state["last_sent_at"] = daily_summary_now.isoformat(
+                timespec="seconds"
+            )
+            daily_summary_state["last_sent_local_date"] = (
+                daily_summary_now.date().isoformat()
+            )
+            print(
+                "Daily summary email sent to "
+                f"{', '.join(app_config.daily_summary.summary_recipients)}."
+            )
+        except (OSError, smtplib.SMTPException, ValueError) as error:
+            daily_summary_error = f"Daily summary email failed: {error}"
+            print_stderr(daily_summary_error)
+            raw_records = daily_summary_state.get("run_records", [])
+            if isinstance(raw_records, list) and raw_records:
+                latest_record = raw_records[-1]
+                if isinstance(latest_record, dict):
+                    latest_errors = latest_record.get("errors", [])
+                    if not isinstance(latest_errors, list):
+                        latest_errors = []
+                    latest_errors.append(daily_summary_error)
+                    latest_record["errors"] = latest_errors
 
-            try:
-                save_state(
-                    state_path,
-                    accounts_state,
-                    all_configured_accounts,
-                    daily_summary_state=daily_summary_state,
-                )
-            except OSError as error:
-                print_stderr(f"Could not write state file {state_path}: {error}")
-                return 1
+        try:
+            save_state(
+                state_path,
+                accounts_state,
+                all_configured_accounts,
+                daily_summary_state=daily_summary_state,
+            )
+        except OSError as error:
+            print_stderr(f"Could not write state file {state_path}: {error}")
+            return 1
 
     if args.json_output:
         output_path = Path(args.json_output)

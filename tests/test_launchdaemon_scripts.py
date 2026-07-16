@@ -8,6 +8,25 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = REPO_ROOT / "scripts" / "install_launchdaemon.sh"
+INSTALLATION_GUIDE = REPO_ROOT / "INSTALLATION.md"
+
+
+def test_install_paths_exclude_private_instance_profiles() -> None:
+    stale_cleanup = 'rm -rf -- "${INSTALL_DIR}/instances"'
+
+    install_text = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    for expected in (
+        "--exclude '.env'",
+        "--exclude '.env.*'",
+        "--exclude '*.local'",
+        "--exclude 'instances/'",
+    ):
+        assert expected in install_text
+    assert stale_cleanup in install_text
+
+    guide_text = INSTALLATION_GUIDE.read_text(encoding="utf-8")
+    assert "--exclude 'instances/'" in guide_text
+    assert 'rm -rf -- "${EC_INSTALL_DIR}/instances"' in guide_text
 
 
 def test_install_script_does_not_require_openai_api_key_before_install_work(tmp_path: Path) -> None:

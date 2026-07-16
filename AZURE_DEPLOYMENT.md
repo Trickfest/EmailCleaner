@@ -1,800 +1,534 @@
 # EmailCleaner Azure Deployment Guide
 
-This guide explains how to deploy EmailCleaner to Azure using the scripts that
-are already included in this repository. It is written as an operator guide:
-start here when setting up a new Azure deployment, refreshing the deployed code,
-checking status, reading logs, or tearing the deployment down.
+EmailCleaner runs in Azure as a scheduled Azure Container Apps job. Each job
+starts, scans its configured mailboxes, writes state to Azure Files, sends any
+configured summary, and exits.
 
-EmailCleaner runs in Azure as an Azure Container Apps job. It is not a web app
-and it is not an always-on VM. The job starts on a schedule, scans configured
-mailboxes, writes state to Azure Files, sends any configured summary email, then
-exits.
+The repository supports multiple private EmailCleaner instances that share one
+application image and, when appropriate, shared Azure infrastructure. Every
+instance-targeting command requires an explicit `--profile NAME`; there is no
+default profile.
 
-## Deployed Shape
+## Deployment Shape
 
-The app deployment scripts create and manage these Azure resources:
+The recommended multi-instance arrangement is:
 
-| Resource | Purpose |
+| Resource | Shared or isolated |
 | --- | --- |
-| App resource group | Holds EmailCleaner runtime resources so they can be managed or deleted together. A shared ACR can live in a separate resource group. |
-| Azure Container Apps environment | Runtime environment for the scheduled job. |
-| Azure Container Apps job | Runs EmailCleaner manually or on a cron schedule. |
-| Azure Container Registry | Private registry for the EmailCleaner container image. This can be app-specific or a shared registry in a separate resource group. |
-| Storage account and Azure Files share | Stores runtime files mounted at `/data`. |
-| Log Analytics workspace | Stores completed job logs for later review. |
+| Azure Container Registry and image | Shared |
+| Resource group | Shared when one operator owns all instances |
+| Container Apps environment | Shared |
+| Log Analytics workspace | Shared |
+| Storage account | Shared |
+| Container Apps job | One per profile |
+| Azure Files share and mount registration | One per profile |
+| Container Apps job identity and secrets | One per profile |
+| Runtime configuration and state | One per profile |
 
-The default deployment settings match the current production-style setup:
+Container Apps jobs have no public endpoint. Account credentials are stored as
+job-scoped Container Apps secrets, not in the image or the Azure Files share.
 
-| Setting | Default |
-| --- | --- |
-| Azure region | `centralus` |
-| Resource group | `rg-emailcleaner-prod` |
-| Container Apps environment | `cae-emailcleaner-prod` |
-| Container Apps job | `caj-emailcleaner-prod` |
-| Log Analytics workspace | `law-emailcleaner-prod` |
-| Azure Files share | `emailcleaner-data` |
-| Schedule | `*/15 * * * *` |
-| Runtime cap | `3600` seconds |
-| CPU / memory | `0.25` CPU / `0.5Gi` |
-| ACR resource group | `rg-emailcleaner-prod` by default, or a shared registry resource group |
-| ACR SKU | `Basic` |
+## Private Local Profiles
 
-Azure requires the ACR name and storage account name to be globally unique.
-`scripts/azure/init-env.sh` generates stable names with an eight-digit random
-suffix and stores them in `scripts/azure/env.local`.
+Private runtime files live under ignored profile directories:
 
-Local Docker is not required. `scripts/azure/deploy.sh` uses `az acr build`, so
-the image is built in Azure Container Registry.
+```text
+instances/
+  primary.local/
+    azure.env
+    secrets.env
+    config.json
+    accounts.json
+    rules.json
 
-## Optional Shared Container Registry
-
-If you operate more than one Azure Container Apps job, it is usually cleaner and
-cheaper to use one shared Azure Container Registry. EmailCleaner owns the helper
-scripts for this shared registry because they are generic and can be reused by
-other automation projects.
-
-The shared registry scripts create only:
-
-| Resource | Purpose |
-| --- | --- |
-| Shared registry resource group | Holds the reusable Azure Container Registry. |
-| Azure Container Registry | Stores container images for EmailCleaner and other automation jobs. |
-
-They do not create EmailCleaner runtime storage, jobs, secrets, or logs.
-
-Create local shared registry settings:
-
-```bash
-scripts/azure/init-shared-acr-env.sh
+  secondary.local/
+    azure.env
+    secrets.env
+    config.json
+    accounts.json
+    rules.json
 ```
 
-Provision the shared registry:
+Keep standard filenames inside each directory. The profile name selects the
+source files and Azure targets; the container continues to read
+`/data/config.json`, `/data/rules.json`, and `/data/.email_cleaner_state.json`.
 
-```bash
-scripts/azure/provision-shared-acr.sh
-```
-
-Check the shared registry:
-
-```bash
-scripts/azure/status-shared-acr.sh
-```
-
-The default shared registry names are intentionally generic:
-
-| Setting | Default |
+| Profile file | Purpose |
 | --- | --- |
-| Shared ACR resource group | `rg-shared-container-registry-prod` |
-| Shared ACR name prefix | `acrautomationjobs` plus an eight-digit suffix |
-| Shared ACR SKU | `Basic` |
+| `azure.env` | Durable deployment settings: identity, Azure resources, trigger, cron schedule, dry-run mode, and required secret names. |
+| `secrets.env` | Optional integration secrets such as `OPENAI_API_KEY`. |
+| `accounts.json` | Email addresses and app passwords used to populate job-scoped secrets. |
+| `config.json` | Folder selection, IMAP timeout, summary email, and optional OpenAI behavior. |
+| `rules.json` | Per-instance deterministic rules and quarantine cleanup. |
 
-To make EmailCleaner use that shared registry, set these values in
-`scripts/azure/env.local` after creating `scripts/azure/shared-acr.local`:
+Repo-root runtime JSON files remain supported for standalone commands and the
+single-instance macOS installer. Profile-aware Azure scripts never silently
+fall back to those files.
+
+Directories matching `instances/*.local/` are ignored by Git. Confirm private
+files are not tracked before every push:
 
 ```bash
-export AZURE_ACR_RESOURCE_GROUP="<shared-acr-resource-group>"
-export AZURE_ACR_NAME="<shared-acr-name>"
-export AZURE_CREATE_ACR="false"
+git ls-files -- ':(glob)instances/*.local/**' config.json rules.json accounts.json \
+  .email_cleaner_state.json
 ```
 
-With `AZURE_CREATE_ACR=false`, `scripts/azure/provision.sh` verifies the shared
-registry exists instead of creating an app-specific registry. `deploy.sh` still
-builds the EmailCleaner image into the configured registry and grants the
-Container Apps job identity `AcrPull` on that registry.
+The command should print nothing.
 
-## Important Security Rules
+## Profile Safety
 
-Do not commit local runtime files or secret files to GitHub:
+Every private `azure.env` contains an instance identity:
 
-- `config.json`
-- `rules.json`
-- `accounts.json`
+```bash
+export EMAILCLEANER_INSTANCE_NAME="primary"
+```
+
+Profile names must start with a lowercase letter or number and then use only
+lowercase letters, numbers, and hyphens. The same name appears in the directory,
+the `--profile` argument, and `EMAILCLEANER_INSTANCE_NAME`.
+
+The command-line profile and embedded identity must match. For example:
+
+```bash
+scripts/azure/status.sh --profile primary
+```
+
+fails before Azure access if `primary.local/azure.env` identifies a different
+profile. Do not add an environment-variable or shell-session default for the
+profile name.
+
+All instance commands support `--env-file PATH` for controlled testing or
+migration, but `--profile NAME` is still required and must match the file.
+
+## Security And Secret Flow
+
+Keep these files private:
+
+- `instances/NAME.local/config.json`
+- `instances/NAME.local/rules.json`
+- `instances/NAME.local/accounts.json`
+- `instances/NAME.local/secrets.env`
+- `instances/NAME.local/azure.env`
 - `.email_cleaner_state.json`
-- `scripts/azure/env.local`
-- `scripts/azure/shared-acr.local`
-- `scripts/azure/secrets.local`
 
-The repository `.gitignore` already excludes these files. Keep it that way.
-Before pushing, this command should print nothing:
+The deployment flow is:
 
-```bash
-git ls-files config.json rules.json accounts.json .email_cleaner_state.json scripts/azure/env.local scripts/azure/shared-acr.local scripts/azure/secrets.local
-```
+1. `azure.env` selects nonsecret Azure resource names and required secret
+   environment-variable names.
+2. `secrets.env` supplies optional integration secrets such as
+   `OPENAI_API_KEY`.
+3. `accounts.json` supplies email addresses and app passwords.
+4. `deploy.sh` clears matching ambient shell values and reads the selected
+   profile files.
+5. Secret values are included only in a restrictive temporary deployment YAML
+   and then stored as secrets on that profile's Container Apps job.
+6. The temporary file is removed when deployment exits.
 
-Use this command if you want to confirm the ignore rule that applies:
-
-```bash
-git check-ignore -v config.json rules.json accounts.json scripts/azure/env.local scripts/azure/shared-acr.local scripts/azure/secrets.local
-```
-
-### Secret Flow
-
-Secrets are intentionally defined in local files, not in the interactive shell.
-This is the deployment flow:
-
-1. Nonsecret Azure settings live in `scripts/azure/env.local`.
-2. The OpenAI API key normally lives in `scripts/azure/secrets.local`.
-3. Email account addresses and app passwords normally live in the ignored
-   repo-root `accounts.json`.
-4. `scripts/azure/deploy.sh` loads those files through `scripts/azure/common.sh`.
-   The loader clears the named secret variables first, so ambient shell
-   environment values are not used as the source of truth.
-5. `AZURE_SECRET_ENV_VARS` in `env.local` lists exactly which values must be
-   copied into Azure Container Apps secrets.
-6. `deploy.sh` validates that every required secret value is present.
-7. `render-job-yaml.py` renders a temporary job YAML file with the secret
-   values included only for the `az containerapp job update` call.
-8. The temporary YAML file is created with restrictive permissions and removed
-   when the deployment command exits.
-9. Azure stores the values as Container Apps secrets.
-10. The job container receives them as environment variables through
-    `secretRef`.
-11. EmailCleaner loads account credentials from those environment variables at
-    runtime.
-
-By default, `accounts.json` is not uploaded to Azure Files. That is intentional.
-The deployed job receives account credentials through Container Apps secrets,
-not through a credentials file mounted at `/data/accounts.json`.
-
-`scripts/azure/sync-runtime-files.sh --include-accounts` exists, but only use it
-if you explicitly choose to store account credentials in Azure Files. The
-recommended deployment does not use that option.
-
-### What Is Secure In Azure
-
-The secrets are not public once deployed to Azure:
-
-- They are not committed to GitHub.
-- They are not copied into the container image.
-- They are not uploaded to Azure Files in the recommended flow.
-- They are stored as Azure Container Apps secrets.
-- They are exposed only to the EmailCleaner container as environment variables.
-- Access is controlled by Azure authentication and RBAC.
-
-This does not mean no one can ever access them. Azure users with sufficiently
-high privileges over the resource group or Container Apps job can administer,
-replace, or potentially expose runtime configuration. Treat Azure RBAC as the
-security boundary and keep access to the resource group limited.
+By default, `accounts.json` is not uploaded to Azure Files. Its absence from
+the share is expected. Avoid `sync-runtime-files.sh --include-accounts` unless
+there is a deliberate reason to store credentials on Azure Files.
 
 ## Prerequisites
 
-Install and authenticate the Azure CLI:
+Install and authenticate the Azure CLI, then verify the intended subscription:
 
 ```bash
 az login
 az account show --output table
 ```
 
-Confirm you are on the Azure subscription where the resources should be created.
-If needed, select the subscription:
+If the active subscription is not the deployment target, select it explicitly:
 
 ```bash
-az account set --subscription "<subscription-id-or-name>"
+az account set --subscription '<subscription-id-or-name>'
+az account show --output table
 ```
 
 You also need:
 
-- Python 3 available as `python3`.
-- Git.
-- A valid OpenAI API key if OpenAI fallback or summaries are enabled.
-- Gmail/Yahoo app passwords for the accounts you will scan.
-- Local `config.json`, `rules.json`, and `accounts.json` files configured for
-  the deployment.
+- Python 3.10 or newer for local validation and deployment rendering.
+- Git for source control and default image tags.
+- Gmail/Yahoo app passwords for every configured account.
+- An OpenAI API key only for profiles with OpenAI fallback enabled.
 
-If EmailCleaner is still installed as a macOS LaunchDaemon, do not run the Mac
-daemon and the Azure schedule at the same time unless you intentionally want two
-independent scanners. See `INSTALLATION.md` for LaunchDaemon operations.
+Local Docker is not required because image builds run in Azure Container
+Registry.
 
-## First-Time Setup
+## Optional Shared Registry Bootstrap
 
-Run all commands from the repository root.
-
-### 1. Check Out The Code To Deploy
-
-For a reproducible deployment, deploy from a clean checkout:
+If no reusable ACR exists yet, create one independently of any EmailCleaner
+profile:
 
 ```bash
-git status -sb
-git rev-parse --short HEAD
+scripts/azure/init-shared-acr-env.sh
+scripts/azure/provision-shared-acr.sh
+scripts/azure/status-shared-acr.sh
 ```
 
-`az acr build` sends the current local build context to Azure. If you have
-uncommitted changes to tracked files that are included in the Docker build
-context, they can be deployed even if the image tag is the current commit SHA.
-Use a clean tree when you want the image to match a committed revision.
+This creates `scripts/azure/shared-acr.local`, a shared registry resource group,
+and one ACR. The local file is ignored by Git. Profiles that use this registry
+set its `AZURE_ACR_NAME` and `AZURE_ACR_RESOURCE_GROUP`, then set
+`AZURE_CREATE_ACR="false"`.
 
-### 2. Create `scripts/azure/env.local`
+## Create A Profile Template
 
-Create the local Azure settings file:
+Generate a first-instance template with stable, globally unique ACR and storage
+names:
 
 ```bash
-scripts/azure/init-env.sh
+scripts/azure/init-env.sh --profile primary
 ```
 
-This creates `scripts/azure/env.local` with:
-
-- Central US as the region.
-- The default resource group, job, storage, and logging names.
-- An eight-digit suffix for globally unique ACR and storage account names.
-- `AZURE_ACR_RESOURCE_GROUP` and `AZURE_CREATE_ACR` for either app-specific or
-  shared registry use.
-- The 15-minute schedule.
-- The list of required secret variables.
-
-Do not rerun this with `--force` for an existing deployment unless you intend to
-change the generated ACR and storage account names. Those names identify the
-deployed resources.
-
-`env.local` contains deployment settings and generated resource names. It should
-not contain passwords or API keys, but it is still local machine configuration
-and should stay untracked.
-
-If you are using a shared registry, create it with the shared registry scripts
-before provisioning EmailCleaner, then edit `scripts/azure/env.local` so
-`AZURE_ACR_RESOURCE_GROUP` and `AZURE_ACR_NAME` point at that registry and
-`AZURE_CREATE_ACR` is `false`.
-
-### 3. Create `scripts/azure/secrets.local`
-
-Create the local secret file:
+This writes `instances/primary.local/azure.env`. Add private runtime files:
 
 ```bash
-cp scripts/azure/secrets.example scripts/azure/secrets.local
-chmod 600 scripts/azure/secrets.local
+cp config.example.json instances/primary.local/config.json
+cp rules.example.json instances/primary.local/rules.json
+cp accounts.example.json instances/primary.local/accounts.json
+cp scripts/azure/secrets.example instances/primary.local/secrets.env
+chmod 600 instances/primary.local/*
 ```
 
-Edit `scripts/azure/secrets.local` and set:
+Edit the files with real local values. Keep documentation and tracked examples
+fictional.
+
+`init-env.sh` creates a first-instance infrastructure template with a `Manual`
+trigger and `AZURE_DRY_RUN="false"`. For new-account onboarding, change dry-run
+to `true` before the first deployment. Do not assume a generated profile is safe
+to run until its resource names, accounts, rules, summary recipients, and secret
+list have been reviewed.
+
+## Configure `azure.env`
+
+The generated file is the durable source of truth for deployments:
+
+| Setting group | Variables |
+| --- | --- |
+| Profile identity | `EMAILCLEANER_INSTANCE_NAME` must exactly match `--profile`. |
+| Region and image | `AZURE_LOCATION`, `AZURE_IMAGE_NAME`, and `AZURE_BOOTSTRAP_IMAGE`. The bootstrap image is used only while allocating a new job identity. |
+| Shared resources | `AZURE_RESOURCE_GROUP`, `AZURE_CONTAINERAPPS_ENV`, `AZURE_LOG_WORKSPACE`, `AZURE_STORAGE_ACCOUNT`, `AZURE_ACR_NAME`, `AZURE_ACR_RESOURCE_GROUP`, and `AZURE_ACR_SKU`. |
+| Per-instance resources | `AZURE_JOB_NAME`, `AZURE_FILE_SHARE`, and `AZURE_STORAGE_MOUNT_NAME` must be unique within the shared deployment. |
+| Trigger and safety | `AZURE_JOB_TRIGGER_TYPE`, `AZURE_SCAN_CRON`, and `AZURE_DRY_RUN`. |
+| Runtime sizing | `AZURE_MAX_RUNTIME_SECONDS`, `AZURE_REPLICA_TIMEOUT`, `AZURE_CPU`, `AZURE_MEMORY`, `AZURE_REPLICA_RETRY_LIMIT`, `AZURE_PARALLELISM`, and `AZURE_REPLICA_COMPLETION_COUNT`. |
+| Infrastructure mode | `AZURE_PROVISION_SHARED_INFRASTRUCTURE` and `AZURE_CREATE_ACR` control create-versus-verify behavior. |
+| Generated uniqueness | `AZURE_UNIQUE_SUFFIX` seeds generated ACR and storage names. Explicit `AZURE_ACR_NAME` and `AZURE_STORAGE_ACCOUNT` values are authoritative. |
+| Secret contract | `AZURE_SECRET_ENV_VARS` lists every value that `deploy.sh` must install as a job secret. |
+| Optional local paths | `AZURE_SECRETS_FILE`, `AZURE_CONFIG_FILE`, `AZURE_RULES_FILE`, `AZURE_ACCOUNTS_FILE`, and `AZURE_ACCOUNTS_SECRET_FILE` override profile-local defaults. Leave them unset for the standard layout. |
+
+When OpenAI is disabled, remove `OPENAI_API_KEY` from
+`AZURE_SECRET_ENV_VARS`; otherwise deployment still treats it as required. The
+Gmail/Yahoo variable suffixes must match account keys in `accounts.json`.
+
+## Add An Instance To Existing Infrastructure
+
+To share an existing resource group, Container Apps environment, Log Analytics
+workspace, storage account, and ACR, create another profile and set its shared
+resource names to the existing values. Give the new instance unique values for:
+
+- `EMAILCLEANER_INSTANCE_NAME`
+- `AZURE_JOB_NAME`
+- `AZURE_FILE_SHARE`
+- `AZURE_STORAGE_MOUNT_NAME`
+
+Set:
 
 ```bash
-export OPENAI_API_KEY="..."
+export AZURE_PROVISION_SHARED_INFRASTRUCTURE="false"
+export AZURE_CREATE_ACR="false"
 ```
 
-Keep this file untracked.
+`provision.sh` will verify the shared resources rather than recreate them. It
+will create only the selected profile's Azure Files share and Container Apps
+environment storage registration.
 
-### 4. Prepare Runtime Config Files
+In practice, copy the shared-resource values from one healthy profile, retain
+the newly generated `EMAILCLEANER_INSTANCE_NAME`, replace the three
+per-instance resource names, and review `AZURE_SECRET_ENV_VARS`. An unused
+generated `AZURE_UNIQUE_SUFFIX` may remain in the file; explicit ACR and storage
+names take precedence.
 
-Create or update the ignored runtime files in the repository root:
+Use a five-field UTC cron expression. The trigger ignores the cron while it is
+`Manual`:
+
+| Expression | Meaning |
+| --- | --- |
+| `*/15 * * * *` | Every 15 minutes at `:00`, `:15`, `:30`, and `:45`. |
+| `7,22,37,52 * * * *` | Every 15 minutes at `:07`, `:22`, `:37`, and `:52`. |
+
+Keep a new instance manual and dry-run during validation:
 
 ```bash
-cp config.example.json config.json
-cp rules.example.json rules.json
-cp accounts.example.json accounts.json
-chmod 600 config.json rules.json accounts.json
+export AZURE_JOB_TRIGGER_TYPE="Manual"
+export AZURE_DRY_RUN="true"
 ```
 
-Then edit them for the real deployment.
+## Runtime Configuration
 
-`config.json` controls app behavior such as OpenAI fallback, summary email
-settings, summary sender, summary recipients, and summary interval.
+`config.json` controls account folder selection, IMAP timeout, summary email,
+and optional OpenAI fallback. Account scan keys must match the account keys in
+`accounts.json`, for example `gmail:MAIN` and `yahoo:MAIN`.
 
-`rules.json` controls deterministic filtering rules.
+`daily_summary.summary_time` is interpreted in the process's local timezone.
+The current Azure container runs in UTC, so configure the summary time as UTC.
 
-`accounts.json` defines the Gmail/Yahoo accounts and app passwords. The Azure
-deployment reads this file locally during `deploy.sh` and copies those account
-credentials into Container Apps secrets. The file is not uploaded by default.
+`rules.json` controls deterministic keep/delete behavior and quarantine cleanup.
+For a new user, review all inherited sender/domain entries and keep quarantine
+cleanup disabled until initial results have been inspected.
 
-If you add accounts beyond the default Gmail account key `1` and Yahoo account
-key `1`, update `AZURE_SECRET_ENV_VARS` in `scripts/azure/env.local` so the new
-account variables are required and deployed. The naming pattern is:
-
-```bash
-EMAIL_CLEANER_GMAIL_EMAIL_<KEY>
-EMAIL_CLEANER_GMAIL_APP_PASSWORD_<KEY>
-EMAIL_CLEANER_YAHOO_EMAIL_<KEY>
-EMAIL_CLEANER_YAHOO_APP_PASSWORD_<KEY>
-```
-
-For example, account key `2` would need:
-
-```bash
-EMAIL_CLEANER_GMAIL_EMAIL_2
-EMAIL_CLEANER_GMAIL_APP_PASSWORD_2
-```
-
-### 5. Confirm Local Secret Files Are Ignored
-
-Before provisioning, confirm the local files are not tracked:
-
-```bash
-git ls-files config.json rules.json accounts.json .email_cleaner_state.json scripts/azure/env.local scripts/azure/shared-acr.local scripts/azure/secrets.local
-```
-
-Expected result: no output.
-
-## Provision Azure Resources
-
-Create the resource group and supporting Azure resources:
-
-```bash
-scripts/azure/provision.sh
-```
-
-This script:
-
-1. Loads `scripts/azure/env.local`.
-2. Registers required Azure providers.
-3. Creates the resource group.
-4. Creates the Log Analytics workspace.
-5. Creates the Container Apps environment.
-6. Creates an app-specific private Azure Container Registry with admin access
-   disabled, or verifies the configured shared registry exists when
-   `AZURE_CREATE_ACR=false`.
-7. Creates the storage account and Azure Files share.
-8. Registers the Azure Files share as a Container Apps environment storage
-   mount.
-9. Uploads `config.json` and `rules.json`.
-10. Creates `/data/.email_cleaner_state.json` if it does not already exist.
-
-The provision script does not apply secrets. Secrets are applied by
-`scripts/azure/deploy.sh`.
-
-If you want to create infrastructure without uploading runtime config yet, use:
-
-```bash
-scripts/azure/provision.sh --skip-runtime-upload
-```
-
-## Deploy And Validate Manually
-
-Deploy the image as a manual job first. This builds the image in ACR, applies
-Container Apps secrets, updates the job definition, and starts one validation
-execution.
-
-```bash
-scripts/azure/deploy.sh --trigger manual --tag "$(git rev-parse --short HEAD)"
-```
-
-What this script does:
-
-1. Loads nonsecret settings from `scripts/azure/env.local`.
-2. Loads secrets from `scripts/azure/secrets.local` and `accounts.json`.
-3. Builds the container image in Azure Container Registry.
-4. Creates a bootstrap Container Apps job if the job does not already exist.
-5. Enables a system-assigned managed identity for the job.
-6. Grants that identity `AcrPull` on the configured ACR, even when that ACR is
-   in a separate shared resource group.
-7. Renders a temporary job YAML file with secret values.
-8. Applies the real EmailCleaner job definition.
-9. Starts one manual execution unless `--no-run` is provided.
-
-The image tag is usually the current Git short SHA. The current deployed image
-can be seen with `scripts/azure/status.sh`.
-
-## Monitor The Validation Run
-
-Check the job, recent executions, and runtime files:
-
-```bash
-scripts/azure/status.sh --executions 5
-```
-
-Read logs for the latest execution:
-
-```bash
-scripts/azure/logs.sh --tail 100
-```
-
-Read logs for a specific execution:
-
-```bash
-scripts/azure/logs.sh --execution "<execution-name>" --tail 300
-```
-
-Stream a running execution:
-
-```bash
-scripts/azure/logs.sh --execution "<execution-name>" --follow
-```
-
-Completed execution logs are read from Log Analytics. Azure can take a little
-time to ingest logs after a job completes. If the execution status is
-`Succeeded` but the log command returns no lines immediately after completion,
-wait a few minutes and run the log command again.
-
-Yahoo Mail can also be slow to respond. A long Yahoo phase is not automatically
-a failure. Check the execution status and logs before interrupting or
-redeploying.
-
-## Enable The 15-Minute Schedule
-
-After the manual validation run succeeds, switch the job to the configured
-schedule:
-
-```bash
-scripts/azure/deploy.sh --trigger schedule --tag "$(git rev-parse --short HEAD)" --no-run
-```
-
-The default schedule is:
+`accounts.json` supports `gmail_accounts` and `yahoo_accounts`. Each account key
+must be alphanumeric or underscore-compatible so it can map to environment
+variables such as:
 
 ```text
-*/15 * * * *
+EMAIL_CLEANER_GMAIL_EMAIL_MAIN
+EMAIL_CLEANER_GMAIL_APP_PASSWORD_MAIN
 ```
 
-Verify that Azure shows the live job as scheduled:
+List every required secret variable in `AZURE_SECRET_ENV_VARS` in the selected
+profile's `azure.env`.
+
+## Provision One Profile
+
+Provisioning mutates Azure. It registers required providers, creates or verifies
+shared resources according to the profile, creates the instance file share and
+mount registration, uploads runtime files, and initializes state if missing:
 
 ```bash
-scripts/azure/status.sh --executions 5
+scripts/azure/provision.sh --profile primary
 ```
 
-The `Container Apps Job` section should show:
+Use `--skip-runtime-upload` when only infrastructure should be created.
 
-- `Trigger` = `Schedule`
-- `Cron` = `*/15 * * * *`
-- the expected image tag
-- `ReplicaTimeout` = `3600`
-- `ReplicaRetryLimit` = `0`
+## Build The Shared Image
 
-## Day-To-Day Operations
-
-Use this section after the deployment is live. The normal operating loop is:
-
-1. Confirm recent scheduled executions are succeeding.
-2. Review logs when a run fails, takes unusually long, or reports errors.
-3. Confirm runtime files still exist in Azure Files.
-4. Refresh config, rules, secrets, or code only when something changed.
-
-### What Healthy Looks Like
-
-A healthy deployment should have these properties:
-
-| Area | Healthy signal |
-| --- | --- |
-| Schedule | `scripts/azure/status.sh` shows `Trigger` as `Schedule` and `Cron` as the expected expression. |
-| Executions | Recent executions are mostly or entirely `Succeeded`. |
-| Timing | New scheduled executions appear around each cron boundary, such as every 15 minutes for `*/15 * * * *`. |
-| Logs | Logs show each configured account scanned and end without unhandled tracebacks. |
-| OpenAI | Logs or summary email show OpenAI failures as `0` during normal operation. |
-| Quarantine | Logs show `Quarantine failures (will retry next run): 0`. |
-| Runtime files | `config.json`, `rules.json`, and `.email_cleaner_state.json` are present in Azure Files. |
-| Accounts file | `accounts.json: false` is expected in Azure Files for the recommended secret-backed deployment. |
-
-An individual run can find zero messages and still be healthy. The key is that
-the job starts, completes successfully, scans the configured accounts, and does
-not report persistent errors.
-
-### Routine Health Check
-
-For a quick health check:
+Build code once using any profile that points to the shared ACR:
 
 ```bash
-scripts/azure/status.sh --executions 10
-scripts/azure/logs.sh --tail 200
+scripts/azure/build-image.sh \
+  --profile primary \
+  --tag "$(git rev-parse --short HEAD)"
 ```
 
-Review the status output first. The `Container Apps Job` section should show
-the live Azure job configuration, including schedule, image, timeout, and retry
-limit. The `Recent Executions` section should show recent scheduled runs and
-their final status.
+The script prints the full image reference. Keep that exact immutable reference
+for every profile deployment. Building an image does not update any job.
 
-Then review the logs for the latest execution. For normal operation, look for:
+Check `git status --short` before choosing a tag. Use a Git SHA only when the
+worktree is clean and the build therefore corresponds to that commit. For an
+uncommitted validation build, use a unique descriptive or timestamped tag so an
+existing immutable-looking SHA tag is not overwritten with different code.
 
-- `Beginning scan for ... configured account(s)`
-- one account section per configured account
-- `OpenAI fallback: enabled` when OpenAI is expected to run
-- `Quarantine failures (will retry next run): 0`
-- no Python traceback
-- no repeated IMAP authentication or timeout errors
+## Deploy One Profile
 
-The job can still be healthy if it reports `Found 0 new unread message(s)`.
-That only means there was nothing new to process for that account in that run.
-
-### Check Status
+Deploy an existing image reference:
 
 ```bash
-scripts/azure/status.sh --executions 10
+scripts/azure/deploy.sh \
+  --profile primary \
+  --image '<registry>.azurecr.io/emailcleaner:<tag>' \
+  --no-run
 ```
 
-This shows:
+`deploy.sh` creates a bootstrap job if needed, grants its system identity
+`AcrPull` on the configured registry, applies job-scoped secrets, and updates
+the final job definition. It never builds an image.
 
-- Current Azure account.
-- Local resource configuration.
-- Resource group existence.
-- Live Container Apps job trigger, cron, image, timeout, and retry limit.
-- Recent executions.
-- Whether expected runtime files exist in Azure Files.
-
-`accounts.json: false` in the Azure Files section is expected for the
-recommended deployment because account credentials are deployed as Container
-Apps secrets.
-
-If a scheduled run is missing, wait until the next cron boundary and run the
-status command again. For the default 15-minute schedule, a new execution should
-appear around `:00`, `:15`, `:30`, and `:45` UTC.
-
-### Read Logs
-
-Latest execution:
+Render safe YAML without Azure mutation or secret values:
 
 ```bash
-scripts/azure/logs.sh --tail 300
+scripts/azure/deploy.sh \
+  --profile primary \
+  --image '<registry>.azurecr.io/emailcleaner:<tag>' \
+  --render-yaml-only
 ```
 
-Specific execution:
+## Safe Initial Activation
+
+For a new profile:
+
+1. Keep `AZURE_JOB_TRIGGER_TYPE="Manual"`.
+2. Keep `AZURE_DRY_RUN="true"`.
+3. Provision runtime storage.
+4. Deploy the same image used by an existing healthy instance.
+5. Start one execution and inspect status and logs.
+6. Confirm both account credentials work and dry-run reports no state writes or
+   mailbox mutations.
+7. Set `AZURE_DRY_RUN="false"`, deploy again, and perform one supervised live
+   run.
+8. Review the summary and Quarantine folders.
+9. Set `AZURE_JOB_TRIGGER_TYPE="Schedule"` and deploy again.
+
+An empty state file causes the first live run to process the current unread
+backlog. Later runs process only newly discovered unread messages.
+
+## Operate A Profile
+
+A healthy profile has the intended trigger, UTC cron, immutable image, and
+runtime files; recent executions finish `Succeeded`; logs show every configured
+account and no persistent authentication, timeout, Quarantine, or OpenAI errors.
+A successful run that processes zero new messages is still healthy.
+
+Start one execution:
 
 ```bash
-scripts/azure/logs.sh --execution "<execution-name>" --tail 300
+scripts/azure/run-once.sh --profile primary
 ```
 
-Follow a live execution:
+Check live configuration, recent executions, and runtime-file presence:
 
 ```bash
-scripts/azure/logs.sh --execution "<execution-name>" --follow
+scripts/azure/status.sh --profile primary --executions 10
 ```
 
-The same logs are visible in the Azure portal through the Log Analytics
-workspace. The script queries the `ContainerAppConsoleLogs_CL` table.
-
-If the latest execution just finished, Log Analytics may not have ingested the
-logs yet. In that case, wait a few minutes and rerun `logs.sh`. The execution
-status from `status.sh` is still useful while logs are catching up.
-
-### Investigate A Failed Or Suspicious Run
-
-Start with the latest executions:
+Read the latest completed logs:
 
 ```bash
-scripts/azure/status.sh --executions 10
+scripts/azure/logs.sh --profile primary --tail 200
 ```
 
-Then inspect the failing execution:
+Read or follow a specific execution:
 
 ```bash
-scripts/azure/logs.sh --execution "<execution-name>" --tail 300
+scripts/azure/logs.sh \
+  --profile primary \
+  --execution '<execution-name>' \
+  --tail 300
+
+scripts/azure/logs.sh \
+  --profile primary \
+  --execution '<execution-name>' \
+  --follow
 ```
 
-Use this checklist:
+## Change A Schedule Or Trigger
 
-| Signal | Likely meaning | Next action |
-| --- | --- | --- |
-| Execution status is `Failed` | The container exited nonzero or hit a platform failure. | Read logs for traceback, auth failure, missing file, or timeout. |
-| Execution status is still running | The scanner may be waiting on Gmail/Yahoo/OpenAI. | Use `logs.sh --follow`; be patient with Yahoo. |
-| `OPENAI_API_KEY` or OpenAI auth errors | Secret was not deployed or is invalid. | Fix `scripts/azure/secrets.local`, then run `deploy.sh`. |
-| Gmail/Yahoo authentication error | Account email or app password is wrong or expired. | Fix `accounts.json`, then run `deploy.sh`. |
-| Missing `/data/config.json` or `/data/rules.json` | Runtime files were not uploaded or storage mount failed. | Run `scripts/azure/sync-runtime-files.sh`, then run once. |
-| Quarantine failures are nonzero | The app could not move one or more messages. | Review folder permissions and IMAP errors in the same log. |
-| OpenAI failures are nonzero | OpenAI calls failed but messages were kept safely. | Check API key, network/API status, and error summary. |
-
-OpenAI and IMAP failures are designed to fail safe. A failed OpenAI call should
-not cause EmailCleaner to quarantine a message solely because of that error.
-
-### Start One Manual Run
-
-Use this when you want an immediate scan without waiting for the next 15-minute
-schedule boundary:
+Edit the selected profile's durable `azure.env` values:
 
 ```bash
-scripts/azure/run-once.sh
+export AZURE_SCAN_CRON="7,22,37,52 * * * *"
+export AZURE_JOB_TRIGGER_TYPE="Schedule"
 ```
 
-### Refresh Deployed Code
-
-Deploy from the checkout you want Azure to run:
+Then redeploy the image already used by that job and verify the effective Azure
+configuration:
 
 ```bash
-git status -sb
-python3 -m py_compile email_cleaner.py
-python3 -m pytest -q
-python3 email_cleaner.py --help
-scripts/azure/deploy.sh --trigger schedule --tag "$(git rev-parse --short HEAD)" --no-run
-scripts/azure/run-once.sh
-scripts/azure/status.sh --executions 5
+scripts/azure/deploy.sh \
+  --profile primary \
+  --image '<registry>.azurecr.io/emailcleaner:<tag>' \
+  --no-run
+scripts/azure/status.sh --profile primary --executions 5
 ```
 
-Use a clean checkout when you want the deployed image to correspond exactly to a
-commit.
+`deploy.sh --trigger manual|schedule` is useful for a one-off override, but it
+does not rewrite `azure.env`. Persist intended production behavior in the
+profile so a future deployment cannot restore an obsolete trigger or schedule.
 
-### Refresh Config Or Rules
+## Refresh Rules Or Config
 
-Changing `config.json` or `rules.json` does not require rebuilding the image.
-Upload the runtime files:
+Runtime-only changes do not require an image build or job deployment:
 
 ```bash
-scripts/azure/sync-runtime-files.sh
+scripts/azure/sync-runtime-files.sh --profile primary
+scripts/azure/run-once.sh --profile primary
+scripts/azure/logs.sh --profile primary --tail 200
 ```
 
-Then run once and check logs:
+The sync preserves an existing `.email_cleaner_state.json` and creates `{}` only
+when the state file is missing.
+
+## Refresh Credentials
+
+Edit the selected profile's `accounts.json` or `secrets.env`, then redeploy the
+same image so job-scoped secrets are updated:
 
 ```bash
-scripts/azure/run-once.sh
-scripts/azure/status.sh --executions 5
-scripts/azure/logs.sh --tail 200
+scripts/azure/deploy.sh \
+  --profile primary \
+  --image '<registry>.azurecr.io/emailcleaner:<tag>' \
+  --no-run
 ```
 
-`sync-runtime-files.sh` preserves the existing state file if it already exists.
-It creates an empty state file only when one is missing.
+## Deploy A Code Change To Multiple Profiles
 
-### Refresh Secrets Or Account Credentials
-
-Edit one or both local files:
-
-- `scripts/azure/secrets.local`
-- `accounts.json`
-
-Then redeploy the job definition so Container Apps secrets are refreshed:
+Build one image, then explicitly deploy that exact reference to each intended
+profile:
 
 ```bash
-scripts/azure/deploy.sh --trigger schedule --tag "$(git rev-parse --short HEAD)" --no-run
-scripts/azure/run-once.sh
-scripts/azure/logs.sh --tail 200
+scripts/azure/build-image.sh --profile primary --tag '<git-sha>'
+scripts/azure/deploy.sh --profile primary --image '<full-image>' --no-run
+scripts/azure/deploy.sh --profile secondary --image '<full-image>' --no-run
+scripts/azure/status.sh --profile primary --executions 5
+scripts/azure/status.sh --profile secondary --executions 5
 ```
 
-The deploy script will rebuild the image as part of this flow. That is expected.
+There is intentionally no implicit deploy-all default.
 
-### Change The Schedule
+## Delete One Instance
 
-Edit `AZURE_SCAN_CRON` in `scripts/azure/env.local`, then redeploy the scheduled
-job:
+Instance teardown requires both an explicit profile and exact profile/job
+confirmation:
 
 ```bash
-scripts/azure/deploy.sh --trigger schedule --tag "$(git rev-parse --short HEAD)" --no-run
-scripts/azure/status.sh --executions 5
+scripts/azure/destroy.sh \
+  --profile secondary \
+  --confirm 'secondary:caj-emailcleaner-secondary-prod'
 ```
 
-## Azure Portal Checks
+This deletes only the selected job, environment storage registration, and Azure
+Files share. It never deletes the resource group, shared environment, storage
+account, Log Analytics workspace, or ACR.
 
-The scripts are the preferred operational interface, but the Azure portal is
-useful for confirming the same state:
+## Verification Checklist
 
-1. Open the Azure portal.
-2. Go to **Resource groups**.
-3. Open the EmailCleaner resource group, for example `rg-emailcleaner-prod`.
-4. Use the resource group overview as the inventory of app runtime resources.
-5. If `AZURE_CREATE_ACR=false`, also open the shared registry resource group to
-   inspect the Azure Container Registry.
-
-From there, these are the most useful places to check:
-
-| Portal location | What to check |
-| --- | --- |
-| Container Apps job, for example `caj-emailcleaner-prod` | Confirm the job exists, check execution history, trigger type, schedule, image, and failures. |
-| Container Apps job executions | Open recent executions and compare status, start time, end time, and duration. |
-| Log Analytics workspace, for example `law-emailcleaner-prod` | Query historical container logs after completed executions. |
-| Storage account, for example `stemcleaner...` | Inspect the `emailcleaner-data` file share and confirm runtime files exist. |
-| Azure Container Registry, app-specific or shared | Confirm the deployed image tag exists. If the registry is shared, check it in the shared registry resource group. |
-| Access control (IAM) on the resource group | Confirm only intended Azure users can administer the deployment. |
-
-For historical logs in the portal:
-
-1. Open the Log Analytics workspace.
-2. Open **Logs**.
-3. Query `ContainerAppConsoleLogs_CL`.
-4. Filter by the Container Apps job name and, when needed, by execution name.
-
-Example KQL shape:
-
-```kusto
-ContainerAppConsoleLogs_CL
-| where ContainerJobName_s == "caj-emailcleaner-prod"
-| order by time_t desc
-| take 100
-```
-
-For a specific execution, use the execution name as a prefix for
-`ContainerGroupName_s`:
-
-```kusto
-ContainerAppConsoleLogs_CL
-| where ContainerJobName_s == "caj-emailcleaner-prod"
-| where ContainerGroupName_s startswith "<execution-name>-"
-| order by time_t asc
-| project time_t, Log_s
-```
-
-The portal is also a good place to check Azure RBAC. Secrets are not public, but
-users with enough Azure privileges over the resource group or Container Apps job
-can administer runtime configuration. Keep access narrow.
-
-The deployment has no public web endpoint. EmailCleaner runs as a scheduled
-container job and exits.
-
-### Daily And Weekly Care
-
-Daily or whenever you want assurance:
-
-```bash
-scripts/azure/status.sh --executions 10
-scripts/azure/logs.sh --tail 200
-```
-
-Check that scheduled runs are succeeding and that the latest log has no error
-summary.
-
-After changing rules, config, account credentials, or the OpenAI key, always run
-one manual execution and inspect logs:
-
-```bash
-scripts/azure/run-once.sh
-scripts/azure/status.sh --executions 5
-scripts/azure/logs.sh --tail 300
-```
-
-Weekly or after larger changes:
-
-- Confirm the deployed image tag is the tag you expect.
-- Confirm `config.json`, `rules.json`, and `.email_cleaner_state.json` exist in
-  Azure Files.
-- Confirm `accounts.json` is not present in Azure Files unless you intentionally
-  uploaded it.
-- Review Azure resource group access in IAM if other users have subscription
-  access.
-- Check Azure cost for the resource group, especially Log Analytics. If using an
-  app-specific ACR, also check ACR cost. If using a shared ACR, check the shared
-  registry resource group.
-
-## Cost Control And Teardown
-
-The resource group contains billable resources, including Log Analytics,
-Storage, Container Apps job executions, and possibly ACR. ACR Basic has an idle
-cost even when the scanner is not running. Use the shared ACR pattern when you
-operate multiple automation jobs and want only one registry bill.
-
-To delete the EmailCleaner app deployment:
-
-```bash
-scripts/azure/destroy.sh --confirm rg-emailcleaner-prod
-```
-
-This permanently deletes the app resource group, including logs workspace,
-storage account, Azure Files runtime files, scanner state, and any app-specific
-ACR in that same resource group. It does not delete a shared ACR in a separate
-resource group. Deletion can take a long time.
-
-After deletion, confirm Azure no longer has the resource group:
-
-```bash
-az group show --name rg-emailcleaner-prod --output none
-```
-
-Expected result after deletion: Azure reports `ResourceGroupNotFound`.
+- `python3 -m py_compile email_cleaner.py` succeeds.
+- `python3 -m pytest -q` succeeds in the development environment.
+- Every instance command fails when `--profile` is omitted.
+- Rendered YAML contains the selected job, storage mount, trigger, and dry-run
+  setting without secret values.
+- `status.sh` shows the intended immutable image and schedule.
+- `config.json`, `rules.json`, and `.email_cleaner_state.json` exist in the
+  selected Azure Files share.
+- `accounts.json: false` is expected in the recommended deployment.
+- Recent executions succeed and logs show the intended account keys.
+- `git ls-files -- ':(glob)instances/*.local/**'` prints nothing.
 
 ## Troubleshooting
 
-| Symptom | What to check |
+| Symptom | Check |
 | --- | --- |
-| `status.sh` shows no executions | The job may not have been deployed yet, or the schedule boundary may not have occurred. Run `scripts/azure/run-once.sh`. |
-| Execution succeeded but `logs.sh` is empty | Log Analytics ingestion may be delayed. Wait a few minutes and retry. |
-| `accounts.json: false` in status output | Expected in the recommended deployment. Accounts are supplied through Container Apps secrets. |
-| Deploy fails with missing secret variables | Check `AZURE_SECRET_ENV_VARS` in `env.local`, `secrets.local`, and `accounts.json`. |
-| Gmail or Yahoo login fails | Confirm the account email and app password in `accounts.json`, then rerun `deploy.sh` to refresh Container Apps secrets. |
-| OpenAI calls fail | Confirm `OPENAI_API_KEY` in `scripts/azure/secrets.local`, then rerun `deploy.sh`. |
-| First run after rebuilding scans many messages | Expected if `.email_cleaner_state.json` was deleted or recreated empty. Later runs should settle. |
-| Yahoo appears slow | Be patient. Yahoo Mail can take much longer than Gmail to return IMAP responses. |
-| Schedule is wrong | Check the live `Container Apps Job` section from `scripts/azure/status.sh`, not just local files. |
-| Local Mac and Azure both process messages | Stop or uninstall the macOS LaunchDaemon if Azure is now the production runtime. |
+| A command selects the wrong instance | Always pass `--profile NAME`; confirm `EMAILCLEANER_INSTANCE_NAME` in that profile's `azure.env`. |
+| A future deploy restores an old trigger or cron | Update `AZURE_JOB_TRIGGER_TYPE` and `AZURE_SCAN_CRON` in `azure.env`; do not rely only on `--trigger`. |
+| `status.sh` reports `accounts.json: false` | Expected in the recommended secret-backed deployment. |
+| Deployment reports a missing secret | Reconcile `AZURE_SECRET_ENV_VARS` with `accounts.json` and optional values in `secrets.env`. |
+| Config or rule edits are absent in Azure | Run `sync-runtime-files.sh --profile NAME`; code deployment does not upload runtime JSON. |
+| Gmail or Yahoo authentication fails | Correct the selected profile's `accounts.json`, then redeploy the same image to refresh job secrets. |
+| OpenAI fails but deterministic scanning continues | Confirm `OPENAI_API_KEY` and model settings; OpenAI failures keep the message safely. |
+| The first live run processes existing unread mail | Expected with empty state; later runs process only newly discovered unread messages. |
+| A completed execution has no logs yet | Log Analytics ingestion can lag by a few minutes; retry `logs.sh` while using `status.sh` for execution state. |
+| A run remains active longer than Gmail-only runs | Yahoo IMAP can respond more slowly; follow the execution logs and check the configured runtime cap before treating it as stuck. |
+| Azure and a Mac both scan the same accounts | Disable or uninstall the macOS LaunchDaemon; use one production scheduler per account set. |
+
+## Cost Notes
+
+Sharing the ACR avoids a second registry charge. A second job can still add
+Container Apps execution usage, Azure Files storage and transactions, Log
+Analytics ingestion, and optional OpenAI API usage. Treat incremental cost as
+small and measurable rather than guaranteed zero.
 
 ## Script Reference
 
 | Script | Purpose |
 | --- | --- |
-| `scripts/azure/init-env.sh` | Creates ignored local Azure settings with generated unique names. |
-| `scripts/azure/init-shared-acr-env.sh` | Creates ignored local settings for a reusable shared Azure Container Registry. |
-| `scripts/azure/provision-shared-acr.sh` | Creates the shared registry resource group and Azure Container Registry. |
-| `scripts/azure/status-shared-acr.sh` | Shows shared registry status and repositories. |
-| `scripts/azure/provision.sh` | Creates Azure infrastructure and uploads initial runtime files. |
-| `scripts/azure/deploy.sh` | Builds the image, applies secrets, updates the job, and optionally starts a run. |
-| `scripts/azure/sync-runtime-files.sh` | Uploads `config.json` and `rules.json`, and creates state if missing. |
-| `scripts/azure/run-once.sh` | Starts one manual job execution. |
-| `scripts/azure/status.sh` | Shows account, resource, job, execution, and runtime-file status. |
-| `scripts/azure/logs.sh` | Reads completed logs from Log Analytics or follows live logs. |
-| `scripts/azure/destroy.sh` | Deletes the app deployment resource group. It does not delete a shared ACR in a separate resource group. |
-| `scripts/azure/render-job-yaml.py` | Internal helper used by `deploy.sh` to render Container Apps job YAML. |
+| `scripts/azure/init-env.sh` | Creates a private profile `azure.env`. |
+| `scripts/azure/init-shared-acr-env.sh` | Creates ignored settings for an optional shared ACR. |
+| `scripts/azure/provision-shared-acr.sh` | Creates or verifies the optional shared ACR. |
+| `scripts/azure/status-shared-acr.sh` | Shows shared ACR status and repositories. |
+| `scripts/azure/provision.sh` | Creates or verifies infrastructure and provisions one profile's share/mount. |
+| `scripts/azure/build-image.sh` | Builds one shared image without deploying it. |
+| `scripts/azure/deploy.sh` | Deploys an existing image and selected profile secrets. |
+| `scripts/azure/sync-runtime-files.sh` | Uploads selected profile config/rules and initializes state if absent. |
+| `scripts/azure/run-once.sh` | Starts one selected profile execution. |
+| `scripts/azure/status.sh` | Shows selected profile Azure status. |
+| `scripts/azure/logs.sh` | Reads selected profile logs. |
+| `scripts/azure/destroy.sh` | Deletes one selected instance, never shared infrastructure. |
+| `scripts/azure/render-job-yaml.py` | Internal safe job-definition renderer. |

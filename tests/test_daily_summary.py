@@ -559,7 +559,12 @@ def test_main_records_and_sends_daily_summary(monkeypatch: pytest.MonkeyPatch, t
             detail="",
         ),
     )
-    monkeypatch.setattr(app, "count_mailbox_messages", lambda *_args, **_kwargs: 2)
+    folder_counts = iter((1, 2))
+    monkeypatch.setattr(
+        app,
+        "count_mailbox_messages",
+        lambda *_args, **_kwargs: next(folder_counts),
+    )
 
     sent_messages = []
 
@@ -596,3 +601,139 @@ def test_main_records_and_sends_daily_summary(monkeypatch: pytest.MonkeyPatch, t
     assert "Messages processed: 1" in body
     assert "Moved to Quarantine: 1" in body
     assert "Quarantine folder after latest cleanup: 2" in body
+
+
+def test_refresh_daily_summary_quarantine_counts_updates_each_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [make_account(), make_archive_account()]
+    stats = {
+        "gmail:MAIN": app.DailySummaryAccountStats(
+            provider="gmail",
+            account_key="MAIN",
+            email="main@example.test",
+            scanned_folders=1,
+            messages_processed=1,
+            delete_candidates=1,
+            quarantined=1,
+            quarantine_failures=0,
+            llm_evaluated=0,
+            llm_delete_candidates=0,
+            llm_failures=0,
+            cleanup_deleted=0,
+            cleanup_failures=0,
+            errors=(),
+            quarantine_folder_messages=1,
+        ),
+        "yahoo:ARCHIVE": app.DailySummaryAccountStats(
+            provider="yahoo",
+            account_key="ARCHIVE",
+            email="archive@example.test",
+            scanned_folders=1,
+            messages_processed=1,
+            delete_candidates=1,
+            quarantined=1,
+            quarantine_failures=0,
+            llm_evaluated=0,
+            llm_delete_candidates=0,
+            llm_failures=0,
+            cleanup_deleted=0,
+            cleanup_failures=0,
+            errors=(),
+            quarantine_folder_messages=1,
+        ),
+    }
+
+    class FakeIMAPConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def login(self, _email: str, _password: str):
+            return "OK", [b""]
+
+    monkeypatch.setattr(
+        app.imaplib,
+        "IMAP4_SSL",
+        lambda *_args, **_kwargs: FakeIMAPConnection(),
+    )
+    final_counts = iter((2, 1))
+    monkeypatch.setattr(
+        app,
+        "count_mailbox_messages",
+        lambda *_args, **_kwargs: next(final_counts),
+    )
+
+    refreshed = app.refresh_daily_summary_quarantine_counts(
+        accounts=accounts,
+        account_stats=stats,
+        host_override="",
+        port=993,
+        context=app.ssl.create_default_context(),
+        timeout_seconds=60,
+    )
+
+    assert refreshed["gmail:MAIN"].quarantine_folder_messages == 2
+    assert refreshed["yahoo:ARCHIVE"].quarantine_folder_messages == 1
+    assert refreshed["gmail:MAIN"].quarantined == 1
+    assert refreshed["yahoo:ARCHIVE"].quarantined == 1
+
+
+def test_refresh_daily_summary_quarantine_counts_records_count_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = make_account()
+    stats = {
+        "gmail:MAIN": app.DailySummaryAccountStats(
+            provider="gmail",
+            account_key="MAIN",
+            email="main@example.test",
+            scanned_folders=1,
+            messages_processed=1,
+            delete_candidates=1,
+            quarantined=1,
+            quarantine_failures=0,
+            llm_evaluated=0,
+            llm_delete_candidates=0,
+            llm_failures=0,
+            cleanup_deleted=0,
+            cleanup_failures=0,
+            errors=(),
+            quarantine_folder_messages=1,
+        )
+    }
+
+    class FakeIMAPConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def login(self, _email: str, _password: str):
+            return "OK", [b""]
+
+    monkeypatch.setattr(
+        app.imaplib,
+        "IMAP4_SSL",
+        lambda *_args, **_kwargs: FakeIMAPConnection(),
+    )
+    monkeypatch.setattr(app, "count_mailbox_messages", lambda *_args, **_kwargs: None)
+
+    refreshed = app.refresh_daily_summary_quarantine_counts(
+        accounts=[account],
+        account_stats=stats,
+        host_override="",
+        port=993,
+        context=app.ssl.create_default_context(),
+        timeout_seconds=60,
+    )
+
+    refreshed_stats = refreshed["gmail:MAIN"]
+    assert refreshed_stats.quarantine_folder_messages is None
+    assert refreshed_stats.errors == (
+        "final Quarantine count refresh failed: "
+        "mailbox is unavailable or could not be counted",
+    )

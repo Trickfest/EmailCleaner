@@ -6,9 +6,11 @@ usage() {
 Show EmailCleaner Azure deployment status.
 
 Usage:
-  scripts/azure/status.sh [--executions N]
+  scripts/azure/status.sh --profile NAME [--executions N]
 
 Options:
+  --profile NAME  Required instance profile name.
+  --env-file PATH Optional profile env override; the embedded profile name must match.
   --executions N  Number of recent executions to list. Default: 10.
   -h, --help      Show this help text.
 
@@ -22,9 +24,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 EXECUTIONS="10"
+PROFILE=""
+CLI_ENV_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --profile)
+      [[ $# -ge 2 ]] || fail "--profile requires a value."
+      PROFILE="$2"
+      shift 2
+      ;;
+    --env-file)
+      [[ $# -ge 2 ]] || fail "--env-file requires a value."
+      CLI_ENV_FILE="$2"
+      shift 2
+      ;;
     --executions)
       [[ $# -ge 2 ]] || fail "--executions requires a value."
       EXECUTIONS="$2"
@@ -43,7 +57,9 @@ done
 [[ "$EXECUTIONS" =~ ^[0-9]+$ ]] || fail "--executions must be an integer."
 (( EXECUTIONS >= 1 )) || fail "--executions must be >= 1."
 
-load_azure_env
+[[ -n "$PROFILE" ]] || fail "--profile NAME is required."
+
+load_instance_profile "$PROFILE" "$CLI_ENV_FILE"
 require_persistent_resource_names
 validate_azure_config
 require_command az
@@ -56,6 +72,8 @@ section() {
 print_resource_config_summary() {
   cat <<EOF
 Azure deployment resource configuration:
+  profile:               ${AZURE_INSTANCE_PROFILE}
+  profile directory:     ${AZURE_INSTANCE_DIR}
   resource group:        ${AZURE_RESOURCE_GROUP}
   location:              ${AZURE_LOCATION}
   container apps env:    ${AZURE_CONTAINERAPPS_ENV}

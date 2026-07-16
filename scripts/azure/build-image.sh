@@ -3,18 +3,21 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Start one EmailCleaner Azure Container Apps job execution.
+Build one EmailCleaner container image in the configured Azure Container Registry.
 
 Usage:
-  scripts/azure/run-once.sh --profile NAME
+  scripts/azure/build-image.sh --profile NAME [--tag TAG] [--env-file PATH]
 
 Options:
-  --profile NAME   Required instance profile name.
+  --profile NAME   Required instance profile used to resolve the shared ACR.
+  --tag TAG        Image tag. Default: current Git short SHA.
   --env-file PATH  Optional profile env override; the embedded profile name must match.
   -h, --help       Show this help text.
 
 Notes:
-  - This script mutates Azure by starting a job execution.
+  - This script mutates only Azure Container Registry.
+  - It does not deploy or update any EmailCleaner instance.
+  - The resulting immutable image reference can be deployed to multiple profiles.
 EOF
 }
 
@@ -24,6 +27,7 @@ source "${SCRIPT_DIR}/common.sh"
 
 PROFILE=""
 CLI_ENV_FILE=""
+IMAGE_TAG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +39,11 @@ while [[ $# -gt 0 ]]; do
     --env-file)
       [[ $# -ge 2 ]] || fail "--env-file requires a value."
       CLI_ENV_FILE="$2"
+      shift 2
+      ;;
+    --tag)
+      [[ $# -ge 2 ]] || fail "--tag requires a value."
+      IMAGE_TAG="$2"
       shift 2
       ;;
     -h|--help)
@@ -54,9 +63,13 @@ require_persistent_resource_names
 validate_azure_config
 require_command az
 
+IMAGE="$(emailcleaner_image_tag "$IMAGE_TAG")"
 print_config_summary
+info "Building image in Azure Container Registry: ${IMAGE}"
+az acr build \
+  --registry "$AZURE_ACR_NAME" \
+  --image "${AZURE_IMAGE_NAME}:${IMAGE##*:}" \
+  --file "${AZURE_REPO_ROOT}/Dockerfile" \
+  "$AZURE_REPO_ROOT"
 
-az containerapp job start \
-  --name "$AZURE_JOB_NAME" \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --output table
+info "Image build complete: ${IMAGE}"

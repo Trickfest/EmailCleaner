@@ -24,6 +24,12 @@ azure_repo_root() {
   cd "$script_dir/../.." && pwd
 }
 
+azure_instances_dir() {
+  local repo_root
+  repo_root="$(azure_repo_root)"
+  printf '%s/instances\n' "$repo_root"
+}
+
 require_command() {
   local command_name="$1"
   command -v "$command_name" >/dev/null 2>&1 || fail "Required command not found: ${command_name}"
@@ -40,8 +46,11 @@ PY
 load_azure_env() {
   AZURE_SCRIPT_DIR="$(azure_script_dir)"
   AZURE_REPO_ROOT="$(azure_repo_root)"
-  AZURE_ENV_FILE="${1:-${AZURE_SCRIPT_DIR}/env.local}"
+  AZURE_ENV_FILE="${1:-}"
+  [[ -n "$AZURE_ENV_FILE" ]] || fail "Azure env file path is required."
+  [[ -f "$AZURE_ENV_FILE" ]] || fail "Azure env file not found: ${AZURE_ENV_FILE}"
   local azure_config_vars=(
+    EMAILCLEANER_INSTANCE_NAME
     AZURE_LOCATION
     AZURE_RESOURCE_GROUP
     AZURE_CONTAINERAPPS_ENV
@@ -69,6 +78,11 @@ load_azure_env() {
     AZURE_SECRET_ENV_VARS
     AZURE_SECRETS_FILE
     AZURE_ACCOUNTS_SECRET_FILE
+    AZURE_CONFIG_FILE
+    AZURE_RULES_FILE
+    AZURE_ACCOUNTS_FILE
+    AZURE_PROVISION_SHARED_INFRASTRUCTURE
+    AZURE_DRY_RUN
   )
   local config_var
 
@@ -76,10 +90,8 @@ load_azure_env() {
     unset "$config_var"
   done
 
-  if [[ -f "$AZURE_ENV_FILE" ]]; then
-    # shellcheck disable=SC1090
-    source "$AZURE_ENV_FILE"
-  fi
+  # shellcheck disable=SC1090
+  source "$AZURE_ENV_FILE"
 
   AZURE_LOCATION="${AZURE_LOCATION:-centralus}"
   AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-rg-emailcleaner-prod}"
@@ -102,9 +114,15 @@ load_azure_env() {
   AZURE_REPLICA_RETRY_LIMIT="${AZURE_REPLICA_RETRY_LIMIT:-0}"
   AZURE_PARALLELISM="${AZURE_PARALLELISM:-1}"
   AZURE_REPLICA_COMPLETION_COUNT="${AZURE_REPLICA_COMPLETION_COUNT:-1}"
-  AZURE_SECRET_ENV_VARS="${AZURE_SECRET_ENV_VARS:-OPENAI_API_KEY EMAIL_CLEANER_GMAIL_EMAIL_1 EMAIL_CLEANER_GMAIL_APP_PASSWORD_1 EMAIL_CLEANER_YAHOO_EMAIL_1 EMAIL_CLEANER_YAHOO_APP_PASSWORD_1}"
-  AZURE_SECRETS_FILE="${AZURE_SECRETS_FILE:-${AZURE_SCRIPT_DIR}/secrets.local}"
-  AZURE_ACCOUNTS_SECRET_FILE="${AZURE_ACCOUNTS_SECRET_FILE:-${AZURE_REPO_ROOT}/accounts.json}"
+  AZURE_PROVISION_SHARED_INFRASTRUCTURE="${AZURE_PROVISION_SHARED_INFRASTRUCTURE:-true}"
+  AZURE_DRY_RUN="${AZURE_DRY_RUN:-false}"
+  AZURE_SECRET_ENV_VARS="${AZURE_SECRET_ENV_VARS:-OPENAI_API_KEY EMAIL_CLEANER_GMAIL_EMAIL_MAIN EMAIL_CLEANER_GMAIL_APP_PASSWORD_MAIN EMAIL_CLEANER_YAHOO_EMAIL_MAIN EMAIL_CLEANER_YAHOO_APP_PASSWORD_MAIN}"
+  local runtime_dir="${AZURE_INSTANCE_DIR:-${AZURE_REPO_ROOT}}"
+  AZURE_SECRETS_FILE="${AZURE_SECRETS_FILE:-${runtime_dir}/secrets.env}"
+  AZURE_CONFIG_FILE="${AZURE_CONFIG_FILE:-${runtime_dir}/config.json}"
+  AZURE_RULES_FILE="${AZURE_RULES_FILE:-${runtime_dir}/rules.json}"
+  AZURE_ACCOUNTS_FILE="${AZURE_ACCOUNTS_FILE:-${runtime_dir}/accounts.json}"
+  AZURE_ACCOUNTS_SECRET_FILE="${AZURE_ACCOUNTS_SECRET_FILE:-${AZURE_ACCOUNTS_FILE}}"
 
   if [[ -n "${AZURE_ACR_NAME:-}" && -n "${AZURE_STORAGE_ACCOUNT:-}" ]]; then
     AZURE_RESOURCE_NAMES_PERSISTED="1"
@@ -120,9 +138,33 @@ load_azure_env() {
   AZURE_ACR_SERVER="${AZURE_ACR_NAME}.azurecr.io"
 }
 
+load_instance_profile() {
+  local profile="${1:-}"
+  local env_file_override="${2:-}"
+
+  [[ -n "$profile" ]] || fail "--profile NAME is required."
+  [[ "$profile" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "Profile names must use lowercase letters, numbers, and hyphens."
+
+  AZURE_INSTANCE_PROFILE="$profile"
+  AZURE_REPO_ROOT="$(azure_repo_root)"
+  if [[ -n "$env_file_override" ]]; then
+    AZURE_ENV_FILE="$env_file_override"
+  else
+    AZURE_ENV_FILE="$(azure_instances_dir)/${profile}.local/azure.env"
+  fi
+  [[ -f "$AZURE_ENV_FILE" ]] || fail "Profile env file not found for '${profile}': ${AZURE_ENV_FILE}"
+
+  AZURE_INSTANCE_DIR="$(cd "$(dirname "$AZURE_ENV_FILE")" && pwd)"
+  AZURE_ENV_FILE="${AZURE_INSTANCE_DIR}/$(basename "$AZURE_ENV_FILE")"
+  load_azure_env "$AZURE_ENV_FILE"
+
+  [[ -n "${EMAILCLEANER_INSTANCE_NAME:-}" ]] || fail "${AZURE_ENV_FILE} must set EMAILCLEANER_INSTANCE_NAME."
+  [[ "$EMAILCLEANER_INSTANCE_NAME" == "$profile" ]] || fail "Profile '${profile}' does not match EMAILCLEANER_INSTANCE_NAME='${EMAILCLEANER_INSTANCE_NAME}' in ${AZURE_ENV_FILE}."
+}
+
 require_persistent_resource_names() {
   if [[ "${AZURE_RESOURCE_NAMES_PERSISTED:-0}" != "1" ]]; then
-    fail "AZURE_ACR_NAME and AZURE_STORAGE_ACCOUNT are not set persistently. Run scripts/azure/init-env.sh or export both names before running Azure commands."
+    fail "AZURE_ACR_NAME and AZURE_STORAGE_ACCOUNT are not set persistently in ${AZURE_ENV_FILE}."
   fi
 }
 
@@ -135,6 +177,8 @@ validate_azure_config() {
   [[ "$AZURE_RESOURCE_GROUP" =~ ^[A-Za-z0-9._()/-]+$ ]] || fail "AZURE_RESOURCE_GROUP has invalid characters."
   [[ "$AZURE_ACR_RESOURCE_GROUP" =~ ^[A-Za-z0-9._()/-]+$ ]] || fail "AZURE_ACR_RESOURCE_GROUP has invalid characters."
   [[ "$AZURE_CREATE_ACR" =~ ^(true|false)$ ]] || fail "AZURE_CREATE_ACR must be true or false."
+  [[ "$AZURE_PROVISION_SHARED_INFRASTRUCTURE" =~ ^(true|false)$ ]] || fail "AZURE_PROVISION_SHARED_INFRASTRUCTURE must be true or false."
+  [[ "$AZURE_DRY_RUN" =~ ^(true|false)$ ]] || fail "AZURE_DRY_RUN must be true or false."
   [[ "$AZURE_JOB_TRIGGER_TYPE" =~ ^(Manual|Schedule)$ ]] || fail "AZURE_JOB_TRIGGER_TYPE must be Manual or Schedule."
   [[ "$AZURE_REPLICA_TIMEOUT" =~ ^[0-9]+$ ]] || fail "AZURE_REPLICA_TIMEOUT must be an integer."
   [[ "$AZURE_REPLICA_RETRY_LIMIT" =~ ^[0-9]+$ ]] || fail "AZURE_REPLICA_RETRY_LIMIT must be an integer."
@@ -233,6 +277,8 @@ validate_secret_env_values() {
 print_config_summary() {
   cat <<EOF
 Azure deployment configuration:
+  profile:               ${AZURE_INSTANCE_PROFILE}
+  profile directory:     ${AZURE_INSTANCE_DIR}
   resource group:        ${AZURE_RESOURCE_GROUP}
   location:              ${AZURE_LOCATION}
   container apps env:    ${AZURE_CONTAINERAPPS_ENV}
@@ -240,6 +286,7 @@ Azure deployment configuration:
   ACR:                   ${AZURE_ACR_NAME}
   ACR resource group:    ${AZURE_ACR_RESOURCE_GROUP}
   create ACR:            ${AZURE_CREATE_ACR}
+  provision shared infra:${AZURE_PROVISION_SHARED_INFRASTRUCTURE}
   storage account:       ${AZURE_STORAGE_ACCOUNT}
   file share:            ${AZURE_FILE_SHARE}
   storage mount name:    ${AZURE_STORAGE_MOUNT_NAME}
@@ -247,6 +294,7 @@ Azure deployment configuration:
   image name:            ${AZURE_IMAGE_NAME}
   trigger type:          ${AZURE_JOB_TRIGGER_TYPE}
   schedule cron:         ${AZURE_SCAN_CRON}
+  dry run:               ${AZURE_DRY_RUN}
 EOF
 }
 
@@ -268,4 +316,5 @@ export_azure_render_env() {
   export AZURE_PARALLELISM
   export AZURE_REPLICA_COMPLETION_COUNT
   export AZURE_SECRET_ENV_VARS
+  export AZURE_DRY_RUN
 }

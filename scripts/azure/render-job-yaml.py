@@ -60,6 +60,13 @@ def nonnegative_int(name: str, default: str) -> int:
     return value
 
 
+def boolean_env(name: str, default: str = "false") -> bool:
+    raw = env(name, default).lower()
+    if raw not in {"true", "false"}:
+        fail(f"{name} must be true or false.")
+    return raw == "true"
+
+
 def emit_key(lines: list[str], indent: int, key: str, value: object) -> None:
     lines.append(f"{' ' * indent}{key}: {yaml_value(value)}")
 
@@ -82,6 +89,7 @@ def render_yaml(*, image: str, include_secret_values: bool) -> str:
     cron = env("AZURE_SCAN_CRON", "*/15 * * * *")
     secret_env_vars = env("AZURE_SECRET_ENV_VARS").split()
     max_runtime_seconds = nonnegative_int("AZURE_MAX_RUNTIME_SECONDS", "3600")
+    dry_run = boolean_env("AZURE_DRY_RUN")
 
     if trigger_type not in {"Manual", "Schedule"}:
         fail("AZURE_JOB_TRIGGER_TYPE must be Manual or Schedule.")
@@ -140,23 +148,21 @@ def render_yaml(*, image: str, include_secret_values: bool) -> str:
     lines.append("    containers:")
     lines.append(f"      - name: {yaml_value(container_name)}")
     emit_key(lines, 8, "image", image)
-    emit_list(
-        lines,
-        8,
-        "args",
-        [
-            "--max-runtime-seconds",
-            str(max_runtime_seconds),
-            "--rules-file",
-            "/data/rules.json",
-            "--accounts-file",
-            "/data/accounts.json",
-            "--config-file",
-            "/data/config.json",
-            "--state-file",
-            "/data/.email_cleaner_state.json",
-        ],
-    )
+    args = [
+        "--max-runtime-seconds",
+        str(max_runtime_seconds),
+        "--rules-file",
+        "/data/rules.json",
+        "--accounts-file",
+        "/data/accounts.json",
+        "--config-file",
+        "/data/config.json",
+        "--state-file",
+        "/data/.email_cleaner_state.json",
+    ]
+    if dry_run:
+        args.append("--dry-run")
+    emit_list(lines, 8, "args", args)
     lines.append("        resources:")
     emit_key(lines, 10, "cpu", env("AZURE_CPU", "0.25"))
     emit_key(lines, 10, "memory", env("AZURE_MEMORY", "0.5Gi"))
